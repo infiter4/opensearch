@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+node_modules/
+web/dist/
+runs/
+graphify-out/
+.pytest_cache/
+.DS_Store
+
+# data/cache.sqlite is deliberately COMMITTED — it is the demo insurance.
+# cache.py redacts secrets before hashing and before storing; see backend/providers/cache.py
+data/artifacts/
+web/shot.mjs
+.~lock.*#
