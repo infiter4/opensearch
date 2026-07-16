@@ -171,15 +171,14 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
                   data-note="the run as a flowchart: question → researchers → sources → checks → answer">
             {flowOpen ? "▾" : "▸"} flowchart
           </button>
-          {/* Provenance needs the server's graph event. Runs recorded before it was emitted for
-              every mode simply do not have one — say so rather than hiding the control. */}
+          {/* Both views read the ANSWER's own entities and relations, fetched on demand — so they
+              work in every mode and never needed the run's provenance graph. */}
           <button
-            className={`label hover:!text-paper ${graphOpen ? "!text-paper" : ""} ${ex.graph ? "" : "!text-slate/40"}`}
-            onClick={() => ex.graph && setGraphOpen(!graphOpen)}
-            data-note={ex.graph ? "3D provenance graph: claims → sources, coloured by verdict"
-                                : "no graph recorded for this run — ask again to get one"}
+            className={`label hover:!text-paper ${graphOpen ? "!text-paper" : ""}`}
+            onClick={() => setGraphOpen(!graphOpen)}
+            data-note="the answer as a 3D knowledge graph — things it names and how they relate"
           >
-            {graphOpen ? "▾" : "▸"} provenance graph
+            {graphOpen ? "▾" : "▸"} knowledge graph
           </button>
           {ex.artifacts.map((a) => (
             <a key={a.id} className="label hover:!text-paper !text-amber"
@@ -193,7 +192,7 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
 
       {logOpen && !running && <div className="mt-4 rule-t pt-3"><Activity ex={ex} full /></div>}
       {gridOpen && !running && <div className="mt-4"><Grid ex={ex} showDraft={draft} /></div>}
-      {graphOpen && ex.graph && <div className="mt-4 rule-t pt-3"><Graph3D ex={ex} /></div>}
+      {graphOpen && <div className="mt-4 rule-t pt-3"><Graph3D ex={ex} /></div>}
       {flowOpen && <div className="mt-4 rule-t pt-3"><Flowchart ex={ex} /></div>}
 
       {ex.notes.length > 0 && (

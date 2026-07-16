@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import config, sessions, sse
-from ..pipeline import orchestrator
+from ..pipeline import concept, orchestrator
 from ..providers import cache
 
 router = APIRouter(prefix="/api")
@@ -52,6 +52,8 @@ async def _drive(s: sessions.Session) -> None:
                 s.sources[data["id"]] = data
             elif event == "artifact":
                 s.artifacts[data["id"]] = data
+            elif event == "answer_done":
+                s.answer_text = data.get("text") or ""
             s.push(event, data)
     except cache.CacheMiss as e:
         s.push("error", {"scope": "run", "message": f"replay miss — this run was never recorded. {e}"})
@@ -138,6 +140,23 @@ async def source(source_id: int, query_id: str) -> dict:
     # "matched excerpt ↓" header — the receipt gesture, pointing at nothing.
     body = s.registry.body(source_id) if s.registry else ""
     return {**src, "content": body}
+
+
+@router.get("/concept")
+async def concept_graph(query_id: str) -> dict:
+    """The ANSWER as a knowledge graph — entities and the relations the answer states between them.
+
+    On demand: it costs one model call, and nobody should pay for a view they never open. Cached
+    on the session, so expanding it twice is free.
+    """
+    s = sessions.get(query_id)
+    if not s:
+        raise HTTPException(404, "unknown or expired query_id")
+    if s.concept is None:
+        if not s.answer_text:
+            return {"nodes": [], "links": [], "pending": True}
+        s.concept = await concept.extract(s.question, s.answer_text)
+    return s.concept
 
 
 @router.get("/artifact/{artifact_id}")

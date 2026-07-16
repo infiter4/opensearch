@@ -32,6 +32,10 @@ class Session:
     # place the actual page text survives — /api/source/{id} serves the body out of it so the
     # drawer can locate the pinned quote in the real page.
     registry: object | None = None
+    # The finished answer, and the concept graph extracted from it. The graph costs a model call,
+    # so it is built on first request and kept — opening the view twice must not pay twice.
+    answer_text: str = ""
+    concept: dict | None = None
 
     # ——— the run, owned by the SESSION and not by any one HTTP connection ———
     # EventSource reconnects on its own whenever a stream drops, and it reconnects to the same URL.
