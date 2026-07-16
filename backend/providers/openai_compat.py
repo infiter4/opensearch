@@ -149,13 +149,19 @@ async def _retry(model, messages, tools, temperature, timeout):
             s = str(e).lower()
             transient = any(t in s for t in ("429", "500", "502", "503", "504", "overload", "timeout"))
             if emitted or not transient or attempt == 4:
+                runcfg.report("provider", f"{model}: {str(e)[:160]}")
                 raise
-            await asyncio.sleep(min(20.0, 1.5 * 2**attempt))
+            delay = min(20.0, 1.5 * 2**attempt)
+            runcfg.report("provider", f"{model}: {str(e)[:110]} — retry {attempt + 1}/5 in {delay:.0f}s")
+            await asyncio.sleep(delay)
         except httpx.HTTPError as e:
             # Stalls and connection drops are httpx exceptions, not LLMError — see ollama.py.
             if emitted or attempt == 4:
+                runcfg.report("provider", f"{model}: {type(e).__name__}: {str(e)[:140]}")
                 raise LLMError(f"{model}: {type(e).__name__}: {e}") from e
-            await asyncio.sleep(min(20.0, 1.5 * 2**attempt))
+            delay = min(20.0, 1.5 * 2**attempt)
+            runcfg.report("provider", f"{model}: {type(e).__name__} — retry {attempt + 1}/5 in {delay:.0f}s")
+            await asyncio.sleep(delay)
 
 
 async def _once(model, messages, tools, temperature, timeout):

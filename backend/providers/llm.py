@@ -10,7 +10,9 @@ import json
 from typing import Any, AsyncIterator
 
 from . import ollama, openai_compat
-from .runcfg import effective_models, key_for, model_for, set_run_overrides  # noqa: F401 — re-exported
+from .runcfg import (  # noqa: F401 — re-exported
+    effective_models, key_for, model_for, report, set_reporter, set_run_overrides,
+)
 
 
 class LLMError(RuntimeError):

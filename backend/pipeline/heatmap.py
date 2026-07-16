@@ -98,14 +98,24 @@ def cells(reports: list[dict], lead: dict | None = None) -> list[dict]:
     return out
 
 
-def trust(cells_: list[dict], scope: str = "final") -> dict:
-    """Score over SENTENCES, not cells — a sentence citing four sources must not count four times."""
+def trust(cells_: list[dict], scope: str = "final", retracted: list[dict] | None = None) -> dict:
+    """Score over SENTENCES, not cells — a sentence citing four sources must not count four times.
+
+    `retracted` is not optional bookkeeping. A withdrawn sentence is repaired to EMPTY text, so it
+    yields no claims, no verdicts and therefore no cells — counted from cells alone it does not
+    merely miscount, it disappears, and the score silently improves by dropping exactly the
+    sentences that failed hardest. Vanishing is how you lie with a UI. Retracted ids are unioned
+    in and win over any stale iteration-0 verdict still sitting in the matrix.
+    """
+    gone = {r["sentence_id"] for r in (retracted or [])}
     per_sent: dict[str, list[str]] = {}
     for c in cells_:
         per_sent.setdefault(c["sentence_id"], []).append(c["verdict"])
 
-    counts = {"supported": 0, "weak": 0, "unsupported": 0, "contradicted": 0, "retracted": 0}
-    for verdicts in per_sent.values():
+    counts = {"supported": 0, "weak": 0, "unsupported": 0, "contradicted": 0, "retracted": len(gone)}
+    for sid, verdicts in per_sent.items():
+        if sid in gone:
+            continue
         w = worst(verdicts)
         if w in counts:
             counts[w] += 1

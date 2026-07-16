@@ -13,9 +13,25 @@ from ..runtime.registry import spec
 _VALID_LANES = {"web", "academic"}
 
 
-async def plan(question: str, n: int, red_team: bool = False) -> list[dict]:
+async def plan(question: str, n: int, red_team: bool = False,
+               history: list[dict] | None = None) -> list[dict]:
     s = spec("planner")
-    prompt = f"Question: {question}\n\nBreak this into exactly {n} parts."
+    # A follow-up is not self-contained: "what about the paid tier?" decomposes into nothing
+    # useful without the exchange it hangs off. The planner is the only stage that needs this —
+    # sub-agents get the resolved subquery, and the verifier must NEVER see conversation context
+    # or its check stops being independent.
+    prior = ""
+    if history:
+        turns = "\n\n".join(
+            f"Earlier question: {h.get('question', '')}\nAnswer given: {h.get('answer', '')}"
+            for h in history[-3:]
+        )
+        prior = (
+            "This is a follow-up in an ongoing conversation. Earlier turns, for reference only:\n\n"
+            f"{turns}\n\nResolve any pronouns or ellipsis in the new question against them, and "
+            "make every part you produce self-contained.\n\n"
+        )
+    prompt = f"{prior}Question: {question}\n\nBreak this into exactly {n} parts."
 
     try:
         raw = await llm.complete_json(

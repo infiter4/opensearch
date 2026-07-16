@@ -8,7 +8,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from .. import config
 from ..providers import llm
@@ -18,15 +18,25 @@ from .sources import SourceRegistry
 
 async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = None,
               query_id: str | None = None, models: dict[str, str] | None = None,
-              keys: dict[str, str] | None = None) -> AsyncIterator[tuple[str, dict]]:
+              keys: dict[str, str] | None = None,
+              on_registry: Callable[[SourceRegistry], None] | None = None,
+              history: list[dict] | None = None,
+              ) -> AsyncIterator[tuple[str, dict]]:
     """`query_id` MUST be the caller's session id when there is one. The frontend reads it out of
     the `meta` event and hangs every later lookup off it — /api/source/{id}?query_id=… resolves
     against the session registry. Minting a fresh uuid here instead handed the client an id no
     session was keyed by, so clicking a citation chip 404'd.
+
+    `on_registry` hands the caller the live registry. The `source` EVENT carries identity only
+    (n_chars, never the body) — streaming six thousand chars per source down the wire to a client
+    that may never open one is waste. But the drawer needs the real page text to locate the quote
+    in, so the server has to keep it: this is the seam that lets a session serve it on demand.
     """
     preset = config.PRESETS.get(mode, config.PRESETS["pro"])
     cancel = cancel or asyncio.Event()
     reg = SourceRegistry()
+    if on_registry:
+        on_registry(reg)
     query_id = query_id or uuid.uuid4().hex[:12]
     t0 = time.time()
     # BYOK: per-run model picks and keys, ContextVar-scoped so concurrent runs can't cross.
@@ -40,6 +50,11 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
     def emit(event: str, data: dict) -> None:
         q.put_nowait((event, data))
 
+    # Let the transports narrate their own trouble. Without this a rate-limited provider backs off
+    # for up to 32s per attempt in total silence, and the only honest thing the UI could say was
+    # nothing at all.
+    llm.set_reporter(lambda scope, message: emit("provider", {"scope": scope, "message": message}))
+
     yield "meta", {
         "query_id": query_id, "mode": config.RESEARCH_MODE, "search_mode": mode,
         "models": llm.effective_models(),
@@ -51,7 +66,9 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
     }
 
     async def pipeline() -> dict:
-        subtasks = await planner.plan(question, preset.n_agents, red_team=preset.red_team)
+        subtasks = await planner.plan(
+            question, preset.n_agents, red_team=preset.red_team, history=history,
+        )
         emit("plan", {"subtasks": subtasks})
 
         # Board columns/rows are declared as things are interned; the grid must exist on screen
@@ -99,7 +116,10 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
             if not r.get("failed"):
                 emit("agent_report", {
                     "agent_id": r["agent_id"], "text": r["text"],
-                    "trust": heatmap.trust(heatmap.cells([r]), scope=f"agent:{r['agent_id']}"),
+                    "trust": heatmap.trust(
+                        heatmap.cells([r]), scope=f"agent:{r['agent_id']}",
+                        retracted=[x for x in all_retracted if x["sentence_id"].startswith(r["agent_id"])],
+                    ),
                     "retracted": [x for x in all_retracted if x["sentence_id"].startswith(r["agent_id"])],
                 })
 
@@ -128,7 +148,7 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
 
         cells = heatmap.cells(reports, ld)
         emit("heatmap", {"rows": heatmap.rows(reports, ld, all_retracted), "cols": reg.columns()})
-        emit("trust", heatmap.trust(cells, scope="final"))
+        emit("trust", heatmap.trust(cells, scope="final", retracted=all_retracted))
         for c in heatmap.contradictions(cells):
             emit("contradiction", c)
 
@@ -145,31 +165,54 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
 
         # Deep-mode closers, strictly AFTER the answer is on screen: they enrich the run,
         # they never delay it.
-        if preset.knowledge_graph:
+        # Always. graph() is pure code over verdicts the run already produced — no model call, no
+        # network, microseconds. Gating it behind deep mode only denied lite and pro a free view
+        # of their own provenance; the client decides whether to draw it.
+        try:
             emit("graph", report_mod.graph(question, reports, reg, cells))
+        except Exception as e:
+            emit("error", {"scope": "graph", "message": f"{type(e).__name__}: {e}"})
         if preset.report:
             await report_mod.run_reporter(
-                query_id, question, ld, heatmap.trust(cells, scope="final"),
+                query_id, question, ld, heatmap.trust(cells, scope="final", retracted=all_retracted),
                 cells, all_retracted, reg, emit, cancel,
             )
         return ld
 
     task = asyncio.create_task(pipeline())
-    while True:
-        drain = asyncio.create_task(q.get())
-        done, _ = await asyncio.wait({drain, task}, return_when=asyncio.FIRST_COMPLETED)
-        if drain in done:
-            yield drain.result()
-            continue
-        drain.cancel()
-        while not q.empty():          # flush anything queued as the pipeline finished
-            yield q.get_nowait()
-        break
+    # The finally is load-bearing, not hygiene. When the browser goes away — a reload, a closed
+    # tab, a stop — FastAPI closes this async generator, GeneratorExit is raised at the yield, and
+    # the loop below simply stops. Without cancelling `task`, the pipeline runs on forever with
+    # nobody reading it: four agents and hundreds of verify calls, each holding a slot in the
+    # module-GLOBAL verify semaphore (six of them, total, for the whole process). A few reloads
+    # leak every slot, and from then on every new run hangs the moment it reaches verification —
+    # always at the same place, because that is where the first `async with _SEM` waits forever.
+    # An orphaned run also keeps spending the rate limit it is no longer allowed to use.
+    try:
+        while True:
+            drain = asyncio.create_task(q.get())
+            done, _ = await asyncio.wait({drain, task}, return_when=asyncio.FIRST_COMPLETED)
+            if drain in done:
+                yield drain.result()
+                continue
+            drain.cancel()
+            while not q.empty():          # flush anything queued as the pipeline finished
+                yield q.get_nowait()
+            break
 
-    if task.exception():
-        e = task.exception()
-        yield "error", {"scope": "run", "message": f"{type(e).__name__}: {e}"}
-    yield "done", {"elapsed_s": round(time.time() - t0, 1)}
+        if task.exception():
+            e = task.exception()
+            yield "error", {"scope": "run", "message": f"{type(e).__name__}: {e}"}
+        yield "done", {"elapsed_s": round(time.time() - t0, 1)}
+    finally:
+        cancel.set()                      # tell the agent loops to stop between steps
+        if not task.done():
+            task.cancel()
+            try:
+                await task                # cancellation propagates into the gathers, freeing _SEM
+            except (asyncio.CancelledError, Exception):
+                pass
+        llm.set_reporter(None)
 
 
 async def _reverify(claims_: list[dict], reg) -> dict:

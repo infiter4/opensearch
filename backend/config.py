@@ -97,9 +97,30 @@ PRESETS: dict[str, ModePreset] = {
 }
 
 # Concurrency. Sub-agents are expensive turns; verifier calls are cheap and numerous.
+#
+# SEM_VERIFY was 6 on a measured throughput curve (see the table above). That measurement is now
+# stale: Ollama Cloud returns `429 {"error":"too many concurrent requests"}` at 6, and a rejected
+# call costs a full backoff — retry 5/6 waits 30s — so nominal concurrency of 6 delivered less
+# real throughput than 4 that are actually accepted. Deep mode also runs FOUR agents whose verify
+# fan-outs share this one global semaphore, which the original benchmark never exercised.
+# ollama.py additionally parks every caller on a shared cooldown when a 429 lands, so a rate limit
+# backs the whole process off once instead of each worker rediscovering it.
 SEM_AGENTS = 4
-SEM_VERIFY = 6
+SEM_VERIFY = int(os.environ.get("SEM_VERIFY", "4"))
 SEM_FETCH = 6
+
+# THE cap that actually matters: total simultaneous requests to Ollama, counted across every
+# stage. The per-stage semaphores above bound their own fan-out and nothing else — deep mode adds
+# them up to ~11 in flight, and the free tier refuses somewhere around three ("429: too many
+# concurrent requests"). A refusal costs a full backoff, so more nominal concurrency bought less
+# real throughput. Raise only against a paid tier that documents a higher limit.
+OLLAMA_MAX_INFLIGHT = int(os.environ.get("OLLAMA_MAX_INFLIGHT", "3"))
+
+# Replay pacing. A cached draft should still TYPE on screen rather than teleport — but only where
+# a human watches the tokens. Anything shorter than REPLAY_PROSE_CHARS is machinery (verifier JSON,
+# claim extraction) and replays instantly. Turn REPLAY_DELAY down to rehearse faster; 0 = no pacing.
+REPLAY_DELAY = float(os.environ.get("REPLAY_DELAY", "0.012"))
+REPLAY_PROSE_CHARS = int(os.environ.get("REPLAY_PROSE_CHARS", "400"))
 # The rewriter is qwen3.5:397b, which Ollama serializes server-side — extra concurrency buys
 # queue depth, not throughput, and a queue deeper than the stall timeout turns into retries.
 # Repairs are few (only failing sentences) so a small bound costs nothing.

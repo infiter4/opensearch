@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
 import { useChat } from "../state/chat";
 
-/* THE SOURCE PANEL — the actual page, with the pinned quote located in it. The span is found by
-   plain string search, the same way the desk found it. That is the receipt: not "trust me", but
-   here is the sentence, in the page, where I said it was. */
+/* The actual page, with the matched quote located inside it. The span is found by plain string
+   search, the same way the checker found it. That is the receipt: not "trust me", but here is the
+   sentence, in the page, where I said it was. */
 
 export function SourceDrawer() {
-  const { openSource, closeSource, exchanges } = useChat();
+  const { openSource, closeSource } = useChat();
+  const threads = useChat((s) => s.threads);
   const [body, setBody] = useState<{ title: string; url: string; content: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const ex = exchanges.find((e) => e.key === openSource?.exKey);
+  // Search every thread, not just the active one — the drawer outlives a thread switch.
+  const ex = threads.flatMap((t) => t.exchanges).find((e) => e.key === openSource?.exKey);
 
   useEffect(() => {
     setBody(null); setErr(null);
@@ -49,7 +51,9 @@ export function SourceDrawer() {
       );
   }
 
-  const words = body?.content ? body.content.trim().split(/\s+/).length : meta?.n_chars;
+  // Only claim a word count when the page is actually in hand. Falling back to n_chars and calling
+  // it "words" is how an empty drawer wore a confident header.
+  const words = body?.content ? body.content.trim().split(/\s+/).length : null;
 
   return (
     <>
@@ -75,13 +79,13 @@ export function SourceDrawer() {
 
         {openSource.quote && (
           <div className="label px-7 py-2 rule-b !text-amber">
-            matched excerpt — located by string search ↓
+            matched quote — found by exact text search ↓
           </div>
         )}
 
         <div className="flex-1 overflow-y-auto px-7 py-5 text-[13.5px] leading-[1.8] text-paper/70 whitespace-pre-wrap">
-          {err && <div className="font-mono text-[12px] text-amber">could not load the page: {err}</div>}
-          {!err && !body && <div className="label live-dot">pulling the record…</div>}
+          {err && <div className="font-mono text-[12px] text-amber">could not load this source: {err}</div>}
+          {!err && !body && <div className="label live-dot">loading source…</div>}
           {content}
         </div>
       </aside>

@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import time
 from typing import Any, AsyncIterator
 
 import httpx
@@ -42,13 +44,60 @@ def _is_transient(err: str) -> bool:
     return any(t in e for t in _TRANSIENT)
 
 
+def _tidy(msg: str) -> str:
+    """One line, no JSON envelope. `{"error":"too many concurrent requests"}` reads as noise."""
+    m = re.sub(r'\{"error":\s*"([^"]+)"\}', r"\1", msg)
+    return " ".join(m.split())[:150]
+
+
+# ——— one gate for the whole provider ————————————————————————————————
+# THE 429 FIX. Per-stage semaphores cannot bound what a provider actually sees: SEM_VERIFY=4 caps
+# verifies, but deep mode also runs SEM_AGENTS=4 agent turns and SEM_REWRITE=3 rewrites through
+# this same endpoint — up to ELEVEN concurrent requests, against a free tier that starts refusing
+# around three. Every stage was individually well-behaved and collectively over the limit, which
+# is why tuning SEM_VERIFY alone never stopped "too many concurrent requests".
+#
+# So the cap lives where the constraint lives: one semaphore in front of the transport, counting
+# every call regardless of which stage made it.
+_INFLIGHT = asyncio.Semaphore(config.OLLAMA_MAX_INFLIGHT)
+
+# "too many concurrent requests" is a statement about the whole PROCESS, not about the one call
+# that happened to receive it. Each call retrying on its own schedule means the others in flight
+# walk straight back into the same wall, which is how a single 429 becomes "retry 5/6 in 30s" on
+# every worker at once. One 429 parks every caller for the same window.
+_cooldown_until = 0.0
+
+
+def _hold_off(seconds: float) -> None:
+    global _cooldown_until
+    _cooldown_until = max(_cooldown_until, time.monotonic() + seconds)
+
+
+async def _await_cooldown() -> None:
+    while True:
+        left = _cooldown_until - time.monotonic()
+        if left <= 0:
+            return
+        await asyncio.sleep(min(0.5, left))
+
+
 async def _replay(final: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
     """Re-chunk a cached turn. We store the final text, not the original deltas — visually
-    identical on screen, a fraction of the code, and it survives a provider changing its chunking."""
+    identical on screen, a fraction of the code, and it survives a provider changing its chunking.
+
+    The pacing exists so a replayed draft still TYPES on screen instead of teleporting. It is only
+    worth paying where a human is watching the tokens: the researchers' drafts and the lead's
+    answer. A verifier turn is ~120 chars of JSON nobody ever sees, and there are hundreds of them
+    — pacing those spent ~90s of a 118s replay on invisible sleeps. Long content is prose; short
+    content is machinery.
+    """
     content = final.get("content") or ""
-    for i in range(0, len(content), 6):
-        yield {"type": "content", "delta": content[i : i + 6]}
-        await asyncio.sleep(0.012)
+    if len(content) >= config.REPLAY_PROSE_CHARS and config.REPLAY_DELAY > 0:
+        for i in range(0, len(content), 6):
+            yield {"type": "content", "delta": content[i : i + 6]}
+            await asyncio.sleep(config.REPLAY_DELAY)
+    elif content:
+        yield {"type": "content", "delta": content}
     if final.get("calls"):
         yield {"type": "tool_calls", "calls": final["calls"]}
     yield {**final, "type": "done", "cached": True}
@@ -105,19 +154,43 @@ async def _chat_retry(model, messages, tools, num_ctx, temperature, timeout):
                 yield ev
             return
         except LLMError as e:
+            # LLMError is already raised as "{model}: ...", so never prefix the model again here —
+            # that produced "kimi-k2.6:cloud: kimi-k2.6:cloud: HTTP 429: ...".
             if emitted or not _is_transient(str(e)) or attempt == attempts - 1:
+                runcfg.report("provider", _tidy(str(e)))
                 raise
-            await asyncio.sleep(min(30.0, 2.0 * 2**attempt))
+            delay = min(30.0, 2.0 * 2**attempt)
+            # A 429 is about the whole process, not this one call: back every caller off together,
+            # or five more calls immediately retry into the same wall.
+            if "429" in str(e) or "concurrent" in str(e).lower():
+                _hold_off(delay)
+            # Say it out loud. Silently sleeping 32s is why the run looked wedged.
+            runcfg.report("provider", f"{_tidy(str(e))} — retry {attempt + 1}/{attempts} in {delay:.0f}s")
+            await asyncio.sleep(delay)
         except httpx.HTTPError as e:
             # Timeouts, connect failures and mid-stream drops arrive as httpx exceptions, NOT
             # LLMError — without this branch they skip the retry ladder entirely, which means
             # the flakiest failures were the only ones never retried.
             if emitted or attempt == attempts - 1:
+                runcfg.report("provider", f"{model}: {type(e).__name__}")
                 raise LLMError(f"{model}: {type(e).__name__}: {e}") from e
-            await asyncio.sleep(min(30.0, 2.0 * 2**attempt))
+            delay = min(30.0, 2.0 * 2**attempt)
+            runcfg.report(
+                "provider",
+                f"{model}: {type(e).__name__} — retry {attempt + 1}/{attempts} in {delay:.0f}s",
+            )
+            await asyncio.sleep(delay)
 
 
 async def _chat_once(model, messages, tools, num_ctx, temperature, timeout):
+    # Another caller's 429 parks this one too — that is the whole point of a shared cooldown.
+    await _await_cooldown()
+    async with _INFLIGHT:          # the provider counts requests, not stages
+        async for ev in _chat_stream(model, messages, tools, num_ctx, temperature, timeout):
+            yield ev
+
+
+async def _chat_stream(model, messages, tools, num_ctx, temperature, timeout):
     base, headers = _endpoint(model)
     opts: dict[str, Any] = {"num_ctx": num_ctx}
     if temperature is not None:

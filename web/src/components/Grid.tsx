@@ -2,9 +2,9 @@ import { useMemo } from "react";
 import { MARK, worstOf, type LedgerRow, type Verdict } from "../lib/protocol";
 import { checkKey, useChat, type Exchange } from "../state/chat";
 
-/* THE GRID — every claim against every source it cited. Sparse on purpose: a blank cell means
+/* Every claim against every source it cited. Sparse on purpose: a blank cell means
    that sentence never cited that source, which is not a defect. The blocks down the diagonal are
-   the angles working independently; a mark outside its block is two researchers landing on the
+   the researchers working independently; a mark outside its block is two researchers landing on the
    same source on their own — corroboration you can point at. */
 
 function tone(v: Verdict): string {
@@ -31,7 +31,7 @@ export function Grid({ ex, showDraft }: { ex: Exchange; showDraft: boolean }) {
 
   return (
     <div>
-      <div className="label rule-b pb-1.5 mb-2">the grid — claim × source</div>
+      <div className="label rule-b pb-1.5 mb-2">verification matrix — claim × source</div>
       <div className="overflow-x-auto">
         <table className="border-separate" style={{ borderSpacing: 2 }}>
           <thead>

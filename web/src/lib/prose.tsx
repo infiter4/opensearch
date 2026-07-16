@@ -1,6 +1,19 @@
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import { Fragment, type ReactNode } from "react";
 import type { SentenceRef, Verdict } from "./protocol";
 import { MARK } from "./protocol";
+
+/** Render TeX to HTML. Bundled locally, never a CDN — the demo has to survive a bad network.
+ *  throwOnError:false means a malformed formula renders in red rather than taking out the answer
+ *  around it; `$` also appears in prose about money, so a false positive must be harmless. */
+function tex(src: string, display: boolean): string {
+  try {
+    return katex.renderToString(src, { displayMode: display, throwOnError: false, output: "html" });
+  } catch {
+    return "";
+  }
+}
 
 /* Renders the answer from its AUTHORITATIVE text + sentence offsets. The backend guarantees
    text[start:end] === sentence.text, so marks can never drift onto the wrong words — the same
@@ -14,6 +27,7 @@ export interface SentenceDress {
   healed: boolean;
   focused: boolean;
   retractedText?: string;       // original words of a withdrawn sentence
+  struck?: boolean;             // false when rewound: at iteration 0 it had not been withdrawn yet
   note?: string;                // tooltip: why the mark landed
 }
 
@@ -25,8 +39,18 @@ interface ProseProps {
   onFocus?: (sentenceId: string) => void;
 }
 
-const CITE = /\[(\d+)\]/g;
-const INLINE = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*|\[\d+\])/g;
+// Math is $$…$$ or \(…\) ONLY — never single $…$.
+//
+// A single-dollar rule cannot be made safe here. "Pay-As-You-Go ($0.008/credit, cancel anytime)
+// or plans from $30 to $500" contains two dollar signs on one line, so $…$ swallowed the prose
+// between them and rendered "0.008/credit, cancel anytime) or plans ranging from" as a formula.
+// This app's own demo question is about pricing: dollars are money here far more often than math.
+const INLINE = /(\$\$[^$]+\$\$|\\\([\s\S]*?\\\)|\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*|\[\d+\])/g;
+
+/** Un-marked text: streaming copy has no verdicts yet, so it wears no mark. */
+const NO_MARK = (): SentenceDress => ({
+  verdict: null, repairing: false, healed: false, focused: false,
+});
 
 function inline(text: string, sid: string, onCite: ProseProps["onCite"]): ReactNode[] {
   const out: ReactNode[] = [];
@@ -44,6 +68,15 @@ function inline(text: string, sid: string, onCite: ProseProps["onCite"]): ReactN
         >
           {n}
         </button>,
+      );
+    } else if (tok.startsWith("$$") || tok.startsWith("\\(")) {
+      const display = tok.startsWith("$$");
+      const body = display ? tok.slice(2, -2) : tok.slice(2, -2);
+      const html = tex(body, display);
+      out.push(
+        html
+          ? <span key={`m${k++}`} className="katex-host" dangerouslySetInnerHTML={{ __html: html }} />
+          : <span key={`m${k++}`}>{tok}</span>,
       );
     } else if (tok.startsWith("**")) {
       out.push(<strong key={`b${k++}`}>{tok.slice(2, -2)}</strong>);
@@ -76,19 +109,18 @@ function Line({ s, raw, d, onCite, onFocus }: {
   s: SentenceRef; raw: string; d: SentenceDress;
   onCite: ProseProps["onCite"]; onFocus?: ProseProps["onFocus"];
 }) {
-  let body = raw;
-  if (!body && d.retractedText) {
-    // A withdrawn sentence stays on the page, struck through — redlined copy, not a deletion.
-    return (
-      <span className="mk mk-retracted" data-note={d.note ?? MARK.retracted.word}>
-        {d.retractedText}
-      </span>
-    );
-  }
+  // A withdrawn sentence stays on the page, struck through — redlined copy, not a deletion. It is
+  // still prose, so it takes the same markdown path as live text: rendering it raw printed literal
+  // `**bold**` and leading `- ` bullets in the one place a reader is looking hardest.
+  const withdrawn = !raw && !!d.retractedText;
+  let body = withdrawn ? d.retractedText! : raw;
   if (!body) return null;
 
   let prefix: ReactNode = null;
-  let cls = markClass(d);
+  // Struck only in the shipped copy. Rewound to the first draft, a withdrawn sentence was still
+  // live prose wearing whatever mark it had actually earned — showing it struck there would claim
+  // the desk had already acted when it hadn't.
+  let cls = withdrawn && d.struck !== false ? "mk mk-retracted" : markClass(d);
 
   const h = body.match(/^(#{1,6})\s+/);
   if (h) {
@@ -109,9 +141,9 @@ function Line({ s, raw, d, onCite, onFocus }: {
       {prefix}
       <span
         className={cls}
-        data-note={d.note}
+        data-note={withdrawn ? d.note ?? MARK.retracted.word : d.note}
         onClick={onFocus ? () => onFocus(s.id) : undefined}
-        style={onFocus && d.verdict ? { cursor: "pointer" } : undefined}
+        style={onFocus && (d.verdict || withdrawn) ? { cursor: "pointer" } : undefined}
       >
         {inline(body, s.id, onCite)}
       </span>
@@ -161,8 +193,27 @@ function Table({ rows, dress, onCite }: {
 }
 
 export function Prose({ text, sentences, dress, onCite, onFocus }: ProseProps) {
+  // No offsets yet — the answer is still streaming, or it never got segmented. It is still
+  // markdown, and dumping it raw is why a finished-looking answer showed `## Paid plans`, `- ` and
+  // `| Plan | Credits |` as literal text. Synthesize one pseudo-sentence per line and run the very
+  // same block pipeline: headings, bullets, tables, bold, code and chips all render, nothing is
+  // marked (there are no verdicts yet), and the two paths cannot drift apart.
   if (!sentences.length) {
-    return <div className="whitespace-pre-wrap">{stripCites(text, onCite)}</div>;
+    if (!text) return null;
+    const lines: SentenceRef[] = [];
+    let pos = 0;
+    for (const raw of text.split("\n")) {
+      lines.push({ id: `l${lines.length}`, start: pos, end: pos + raw.length, cited: [] });
+      pos += raw.length + 1;
+    }
+    return (
+      <Prose
+        text={text}
+        sentences={lines}
+        dress={NO_MARK}
+        onCite={onCite}
+      />
+    );
   }
 
   const parts: ReactNode[] = [];
@@ -200,18 +251,6 @@ export function Prose({ text, sentences, dress, onCite, onFocus }: ProseProps) {
   return <div className="leading-[1.85]">{parts}</div>;
 }
 
-/** Streaming fallback: no offsets yet, but chips should already be clickable. */
-function stripCites(text: string, onCite: ProseProps["onCite"]): ReactNode[] {
-  const out: ReactNode[] = [];
-  let last = 0, k = 0;
-  for (const m of text.matchAll(CITE)) {
-    if (m.index! > last) out.push(text.slice(last, m.index));
-    const n = Number(m[1]);
-    out.push(
-      <button key={k++} className="cite" onClick={() => onCite(n, "")}>{n}</button>,
-    );
-    last = m.index! + m[0].length;
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out;
-}
+// The old `stripCites` streaming fallback is gone: it rendered chips but dumped every other bit of
+// markdown as literal text. The no-offset path now runs the same block pipeline as the final copy,
+// so there is exactly one renderer to keep honest.

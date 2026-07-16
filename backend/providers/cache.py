@@ -61,10 +61,34 @@ def cache_key(kind: str, req: Any) -> str:
     return hashlib.sha256(f"{kind}\x00{canonical(req)}".encode()).hexdigest()
 
 
+def _restore_from_archive() -> None:
+    """Unpack data/cache.sqlite.gz on first use.
+
+    The warmed cache IS the demo insurance, so it ships with the repo — but at 117MB the raw file
+    is over GitHub's 100MB hard limit, and it is mostly free pages and repetitive JSON (62MB of
+    real rows, 27MB gzipped). So the archive is what is committed, and a fresh clone inflates it
+    here: no build step to forget, and `git clone && run` still replays the demo offline.
+    """
+    db, gz = config.CACHE_DB, config.CACHE_DB.with_suffix(".sqlite.gz")
+    if db.exists() or not gz.exists():
+        return
+    import gzip
+    import shutil
+
+    tmp = db.with_suffix(".sqlite.part")   # never leave a half-written db where a reader looks
+    try:
+        with gzip.open(gz, "rb") as src, open(tmp, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        tmp.replace(db)
+    except Exception:
+        tmp.unlink(missing_ok=True)        # a bad archive must not stop the app; just run live
+
+
 def _db() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _restore_from_archive()
         _conn = sqlite3.connect(config.CACHE_DB, check_same_thread=False, timeout=15.0)
         _conn.execute("PRAGMA journal_mode=WAL")
         # The module _lock only serialises writers INSIDE this process, and asyncio is

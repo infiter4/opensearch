@@ -8,16 +8,37 @@ before hashing), and never echoed back out in events.
 from __future__ import annotations
 
 from contextvars import ContextVar
+from typing import Callable
 
 from .. import config
 
 _models: ContextVar[dict[str, str]] = ContextVar("run_models", default={})
 _keys: ContextVar[dict[str, str]] = ContextVar("run_keys", default={})
+# How a transport tells the run something went wrong WITHOUT failing it. The retry ladder used to
+# swallow every transient error and simply go quiet for up to 32s at a time — from the outside a
+# rate-limited provider and a wedged app look identical. A ContextVar (not a global) because two
+# runs share the event loop, and tasks spawned by asyncio.gather inherit the context.
+_reporter: ContextVar[Callable[[str, str], None] | None] = ContextVar("run_reporter", default=None)
 
 
 def set_run_overrides(models: dict[str, str] | None, keys: dict[str, str] | None) -> None:
     _models.set({k: v for k, v in (models or {}).items() if v})
     _keys.set({k: v for k, v in (keys or {}).items() if v})
+
+
+def set_reporter(fn: Callable[[str, str], None] | None) -> None:
+    _reporter.set(fn)
+
+
+def report(scope: str, message: str) -> None:
+    """Best-effort note to the UI. Never raise: a run must not die because reporting failed."""
+    fn = _reporter.get()
+    if not fn:
+        return
+    try:
+        fn(scope, message)
+    except Exception:
+        pass
 
 
 def model_for(stage: str) -> str:
