@@ -55,8 +55,8 @@ It now does this across **three lanes**, chosen automatically per input:
 ```bash
 cp .env.example .env          # fill in keys; see Configuration below
 python -m venv .venv
-.venv/bin/pip install httpx fastapi uvicorn pytest \
-    asyncpg pgvector pypdf python-multipart      # last four only needed for workspaces
+.venv/bin/pip install httpx fastapi uvicorn pytest python-multipart \
+    asyncpg pgvector pypdf      # last three only needed for workspaces
 .venv/bin/uvicorn backend.main:app --port 8000 --reload   # terminal 1
 cd web && npm install && npm run dev                       # terminal 2 -> localhost:5173
 ```
