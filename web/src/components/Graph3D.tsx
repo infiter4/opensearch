@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { token, useTheme } from "../lib/theme";
 import type { Exchange } from "../state/chat";
 
 /* The ANSWER as a 3D knowledge graph.
@@ -9,20 +10,19 @@ import type { Exchange } from "../state/chat";
  * call, cached on the session), laid out here.
  *
  * three.js is ~600KB, so the module is imported lazily on first expand and never rides in the
- * critical bundle. */
+ * critical bundle. WebGL cannot read CSS, so colours come from the live theme tokens and the graph
+ * is rebuilt when the theme flips. */
 
-const TONE: Record<string, string> = {
-  root: "#E0912A",     // the subject — the one amber thing
-  entity: "#E7E1D4",   // plans, endpoints, products
-  value: "#7FB2C4",    // prices, quotas, rates — the numbers
-  concept: "#8A94A0",
+const TONE_VAR: Record<string, string> = {
+  root: "--signal", entity: "--ink", value: "--cobalt", concept: "--mute",
 };
 const SIZE: Record<string, number> = { root: 30, entity: 12, value: 8, concept: 6 };
 
-interface Concept { nodes: any[]; links: any[]; pending?: boolean }
+interface Concept { nodes: any[]; links: any[]; pending?: boolean; error?: string }
 
 export function Graph3D({ ex }: { ex: Exchange }) {
   const mount = useRef<HTMLDivElement>(null);
+  const theme = useTheme();
   const [data, setData] = useState<Concept | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -31,7 +31,7 @@ export function Graph3D({ ex }: { ex: Exchange }) {
     let dead = false;
     setErr(null);
     fetch(`/api/concept?query_id=${ex.queryId}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status === 404 ? "the server no longer has this run — ask again to graph it" : `HTTP ${r.status}`))))
       .then((d) => { if (!dead) setData(d); })
       .catch((e) => { if (!dead) setErr(String(e.message ?? e)); });
     return () => { dead = true; };
@@ -41,6 +41,9 @@ export function Graph3D({ ex }: { ex: Exchange }) {
     if (!data?.nodes?.length || !mount.current) return;
     let disposed = false;
     let graph: any;
+    const tone = (type: string) => token(TONE_VAR[type] ?? "--mute") || "#888";
+    const line = token("--line-2");
+    const signal = token("--signal");
 
     void Promise.all([import("3d-force-graph"), import("three")])
       .then(([mod, THREE]: any[]) => {
@@ -51,14 +54,15 @@ export function Graph3D({ ex }: { ex: Exchange }) {
         const label = (n: any) => {
           const c = document.createElement("canvas");
           const font = 34;
+          const face = `500 ${font}px "IBM Plex Mono", ui-monospace, monospace`;
           const probe = c.getContext("2d")!;
-          probe.font = `600 ${font}px ui-monospace, monospace`;
+          probe.font = face;
           const text = String(n.label ?? "");
           c.width = probe.measureText(text).width + 20;
           c.height = font + 16;
           const g = c.getContext("2d")!;
-          g.font = `600 ${font}px ui-monospace, monospace`;
-          g.fillStyle = TONE[n.type] ?? "#E7E1D4";
+          g.font = face;
+          g.fillStyle = tone(n.type);
           g.textBaseline = "middle";
           g.fillText(text, 10, c.height / 2);
           const tex = new THREE.CanvasTexture(c);
@@ -75,24 +79,25 @@ export function Graph3D({ ex }: { ex: Exchange }) {
         graph = new ForceGraph3D(mount.current!)
           .width(mount.current!.clientWidth)
           .height(520)
-          .backgroundColor("#00000000")
+          .backgroundColor("rgba(0,0,0,0)")
           .graphData(structuredClone(data))
           .nodeLabel((n: any) => n.label)
-          .nodeColor((n: any) => TONE[n.type] ?? "#8A94A0")
+          .nodeColor((n: any) => tone(n.type))
           .nodeVal((n: any) => SIZE[n.type] ?? 3)
-          .nodeOpacity(0.9)
+          .nodeOpacity(0.92)
+          .nodeResolution(24)
           .nodeThreeObjectExtend(true)
           .nodeThreeObject(label)
           // Curvature is what makes it read as a web rather than a wiring diagram.
           .linkCurvature(0.25)
-          .linkColor(() => "rgba(231,225,212,0.55)")
-          .linkWidth(1.6)
-          .linkOpacity(0.75)
+          .linkColor(() => line)
+          .linkWidth(1.1)
+          .linkOpacity(0.8)
           .linkLabel((l: any) => l.label || "")
           .linkDirectionalParticles(2)
-          .linkDirectionalParticleWidth(2.2)
+          .linkDirectionalParticleWidth(2)
           .linkDirectionalParticleSpeed(0.005)
-          .linkDirectionalParticleColor(() => "rgba(224,145,42,0.9)")
+          .linkDirectionalParticleColor(() => signal)
           .cooldownTicks(140)
           .onNodeClick((n: any) => {
             const dist = 90;
@@ -116,25 +121,30 @@ export function Graph3D({ ex }: { ex: Exchange }) {
     return () => {
       disposed = true;
       try { graph?.__cleanup?.(); graph?._destructor?.(); } catch { /* already gone */ }
+      if (mount.current) mount.current.innerHTML = "";
     };
-  }, [data]);
+  }, [data, theme]);
 
-  if (err) return <div className="label !text-amber">could not build the graph: {err}</div>;
+  if (err) return <div className="label !text-signal">could not build the graph: {err}</div>;
   if (!data) return <div className="label live-dot">reading the answer…</div>;
   if (data.pending) return <div className="label">the answer is not finished yet</div>;
+  if (data.error) return <div className="label !text-signal">could not build the graph: {data.error} — reopen to try again</div>;
   if (!data.nodes.length) return <div className="label">nothing graphable in this answer</div>;
 
   return (
     <div>
-      <div className="label mb-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+      <div className="label mb-3 flex flex-wrap items-center gap-x-5 gap-y-1">
         <span>{data.nodes.length} things · {data.links.length} relationships</span>
         <span className="flex-1" />
-        <span className="text-[#E0912A]">● subject</span>
-        <span className="text-paper/70">● entity</span>
-        <span className="text-[#7FB2C4]">● value</span>
+        {(["root", "entity", "value"] as const).map((k) => (
+          <span key={k} className="flex items-center gap-1.5 !text-faint">
+            <span className="w-[6px] h-[6px] rounded-full" style={{ background: `var(${TONE_VAR[k]})` }} />
+            {k === "root" ? "subject" : k}
+          </span>
+        ))}
       </div>
-      <div ref={mount} className="w-full" style={{ height: 520 }} />
-      <div className="label !text-[9px] mt-1 text-slate/60">
+      <div ref={mount} data-testid="graph3d" className="w-full rounded-[3px] bg-raised/40" style={{ height: 520 }} />
+      <div className="label !text-[9px] !text-faint mt-2">
         drag to rotate · scroll to zoom · click a node to fly to it
       </div>
     </div>

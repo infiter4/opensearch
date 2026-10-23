@@ -11,6 +11,12 @@ export type RunPhase =
   // better than a spinner that will never move.
   | "interrupted";
 
+/** A run that is still moving: the only state that holds the composer, shows live progress, or
+ *  is worth re-attaching to. "interrupted" is at rest — it stopped, and it offers resume. Three
+ *  components each spelled this test differently, and the composer counted an interrupted run as
+ *  busy: a stop button that stopped nothing, over a thread you could no longer ask in. */
+export const isLive = (p: RunPhase): boolean => p !== "done" && p !== "error" && p !== "interrupted";
+
 export interface Exchange {
   key: string;               // client-side key, stable for React
   queryId: string | null;    // server session id, from the POST + meta
@@ -54,6 +60,9 @@ export interface Exchange {
   notes: { scope: string; message: string }[];  // orphan catches, non-fatal errors — worth showing
   graph: { nodes: any[]; links: any[] } | null;  // deep mode: provenance graph
   artifacts: { id: string; name: string; url: string; kind: string }[];  // deep mode: reports
+  /** Re-attached after a reload: the server is about to replay the run from its first event, so
+   *  the first one to land resets everything derived from the stream (see `apply`). */
+  resync?: boolean;
 }
 
 export interface Thread {
@@ -164,6 +173,7 @@ const encode = (t: Thread, slim = false) => ({
   exchanges: t.exchanges.map((ex) => ({
     ...ex,
     repairing: [] as string[],       // transient by definition — nothing is mid-repair on disk
+    resync: false,
     healed: [...ex.healed],
     // A run cut off by a reload is not "done" — it stopped, and it says so.
     phase: ex.phase === "done" || ex.phase === "error" ? ex.phase : "interrupted",
@@ -242,7 +252,12 @@ function saveThreads(threads: Thread[], preferSlim = false): void {
     .filter((t) => t.exchanges.length)
     .sort((a, b) => b.updated - a.updated)
     .slice(0, MAX_THREADS);
-  if (!keep.length) return;
+  if (!keep.length) {
+    // Nothing left to keep IS the state to keep. Returning early left the last stored history in
+    // place, so deleting your only conversation brought it straight back on the next reload.
+    try { localStorage.setItem(LS_KEY, "[]"); } catch { /* ignore */ }
+    return;
+  }
 
   for (const slim of preferSlim ? [true] : [false, true]) {
     for (let n = keep.length; n > 0; n--) {
@@ -275,14 +290,22 @@ function scheduleSave(): void {
     saveTimer = null;
     try {
       const threads = useChat.getState().threads;
-      const hot = threads.some((t) =>
-        t.exchanges.some((e) => e.phase !== "done" && e.phase !== "error" && e.phase !== "interrupted"));
+      const hot = threads.some((t) => t.exchanges.some((e) => isLive(e.phase)));
       saveThreads(threads, hot);
     } catch { /* never break a run over a save */ }
   }, SAVE_EVERY_MS);
 }
 
 const newThreadId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+const findExchange = (s: { threads: Thread[] }, exKey: string): Exchange | undefined =>
+  s.threads.flatMap((t) => t.exchanges).find((e) => e.key === exKey);
+
+/** The open EventSource per exchange, so stop/retry/delete can actually hang up. Without this a
+ *  stopped run kept streaming into its exchange — and an `agent_status` arriving after the stop
+ *  flipped it back to "checking": a run you stopped started moving again. */
+const streams = new Map<string, EventSource>();
+const hangUp = (exKey: string) => { streams.get(exKey)?.close(); streams.delete(exKey); };
 
 /** Append to the run log. A deep run emits ~500 checks; the log is the honest record of them, but
  *  it is also persisted, so it is bounded. The head is kept because that is where planning and
@@ -330,6 +353,14 @@ export const useChat = create<ChatState>((set, get) => ({
   openThread: (id) => set({ activeId: id, openSource: null, focusSentence: null }),
   deleteThread: (id) =>
     set((s) => {
+      // A conversation deleted mid-run must not keep a server run spending the provider budget
+      // for an answer nobody can see any more.
+      for (const ex of s.threads.find((t) => t.id === id)?.exchanges ?? []) {
+        hangUp(ex.key);
+        if (ex.queryId && isLive(ex.phase)) {
+          void fetch(`/api/research/${ex.queryId}/stop`, { method: "POST" }).catch(() => {});
+        }
+      }
       const threads = s.threads.filter((t) => t.id !== id);
       saveThreads(threads);
       return { threads, activeId: s.activeId === id ? (threads[0]?.id ?? "") : s.activeId };
@@ -337,6 +368,10 @@ export const useChat = create<ChatState>((set, get) => ({
 
   async loadWorkspaces() {
     try {
+      // Ask health first. Probing /api/workspaces on a server with no store 503s by design, and
+      // the browser logged that as a console error on every single page load.
+      const health = await fetch("/api/health").then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (!health?.store?.enabled) { set({ storeEnabled: false }); return; }
       const res = await fetch("/api/workspaces");
       if (!res.ok) { set({ storeEnabled: false }); return; }   // 503 => feature off
       const { workspaces } = await res.json();
@@ -425,6 +460,13 @@ export const useChat = create<ChatState>((set, get) => ({
       if (!res.ok) throw new Error(`start failed: HTTP ${res.status}`);
       const { query_id } = await res.json();
       patch(set, ex.key, () => ({ queryId: query_id }));
+      // Stopped (or retried away) while the POST was in flight: the run exists server-side now,
+      // so stop it there too instead of attaching to a run nobody is watching.
+      const cur = findExchange(get(), ex.key);
+      if (!cur || !isLive(cur.phase)) {
+        void fetch(`/api/research/${query_id}/stop`, { method: "POST" }).catch(() => {});
+        return;
+      }
       get().listen(ex.key, query_id);
     } catch (e: any) {
       patch(set, ex.key, () => ({
@@ -439,7 +481,9 @@ export const useChat = create<ChatState>((set, get) => ({
    *  restarts. That is what makes a reload continue instead of researching all over again. */
   listen(exKey, queryId) {
     try {
+      hangUp(exKey);
       const es = new EventSource(`/api/research/stream?query_id=${queryId}`);
+      streams.set(exKey, es);
       const forward = (event: string) =>
         es.addEventListener(event, (m: MessageEvent) => {
           // One malformed frame must not throw out of the listener and kill the run. Parse once,
@@ -451,7 +495,7 @@ export const useChat = create<ChatState>((set, get) => ({
             return;
           }
           get().apply(exKey, event, d);
-          if (event === "done" || (event === "error" && d?.scope === "run")) es.close();
+          if (event === "done" || (event === "error" && d?.scope === "run")) hangUp(exKey);
         });
       [
         "meta", "route", "plan", "agent_status", "agent_tool", "source", "agent_token", "agent_answer",
@@ -460,11 +504,21 @@ export const useChat = create<ChatState>((set, get) => ({
         "error", "done",
       ].forEach(forward);
       es.onerror = () => {
-        // EventSource retries on its own, and reattaching is now safe (the server replays rather
-        // than re-runs), so a blip costs nothing. Only close once the run is actually finished.
-        const cur = get().threads.flatMap((t) => t.exchanges).find((e) => e.key === exKey);
-        if (cur && cur.phase !== "done" && cur.phase !== "error") return;
-        es.close();
+        const cur = findExchange(get(), exKey);
+        if (!cur || !isLive(cur.phase)) { hangUp(exKey); return; }
+        // A dropped connection is CONNECTING: EventSource retries by itself, and reattaching is
+        // safe (the server replays rather than re-runs), so a blip costs nothing. A REFUSED one —
+        // 404, the server restarted or the session expired — is CLOSED for good. Waiting on that
+        // spun "researching… starting…" forever and held the composer hostage.
+        if (es.readyState === EventSource.CLOSED) {
+          hangUp(exKey);
+          patch(set, exKey, (ex) => ({
+            phase: "interrupted" as RunPhase,
+            resync: false,
+            log: note(ex, "warn", "the server no longer has this run"),
+          }));
+          saveThreads(get().threads);
+        }
       };
     } catch (e: any) {
       patch(set, exKey, () => ({
@@ -479,29 +533,41 @@ export const useChat = create<ChatState>((set, get) => ({
    *  costs nothing and re-researches nothing. */
   reattach() {
     for (const ex of get().threads.flatMap((t) => t.exchanges)) {
-      if (ex.queryId && (ex.phase === "interrupted" || ex.phase === "researching" ||
-                         ex.phase === "checking" || ex.phase === "repairing" || ex.phase === "writing")) {
-        patch(set, ex.key, () => ({ phase: "researching" as RunPhase, log: [], checks: {}, draft: {} }));
+      if (ex.queryId && (ex.phase === "interrupted" || isLive(ex.phase))) {
+        // Don't clear anything yet: if the server no longer has the run, what was saved is all
+        // there is. The first replayed event resets the exchange (see `apply`).
+        patch(set, ex.key, () => ({ phase: "researching" as RunPhase, resync: true }));
         get().listen(ex.key, ex.queryId);
       }
     }
   },
 
   async stop(exKey) {
-    const ex = get().threads.flatMap((t) => t.exchanges).find((e) => e.key === exKey);
-    if (!ex?.queryId) return;
+    const ex = findExchange(get(), exKey);
+    if (!ex) return;
+    // Come to rest first, unconditionally. With no server id yet (the start POST still in flight)
+    // the old early return left a stop button that did nothing; ask() now stops that run itself
+    // when its id arrives.
+    hangUp(exKey);
+    patch(set, exKey, (cur) => ({
+      phase: "done" as RunPhase,
+      resync: false,
+      elapsed: (Date.now() - cur.startedAt) / 1000,
+      log: note(cur, "warn", "stopped"),
+    }));
+    saveThreads(get().threads);
+    if (!ex.queryId) return;
     try {
       await fetch(`/api/research/${ex.queryId}/stop`, { method: "POST" });
     } catch { /* the run ending is what matters; a failed stop call is not worth a dialog */ }
-    patch(set, exKey, () => ({ phase: "done" as RunPhase }));
-    saveThreads(get().threads);
   },
 
   /** Re-run an interrupted or failed exchange in place. Most of its work is already cached, so
    *  this is usually far cheaper than the first attempt. */
   async retry(exKey) {
-    const ex = get().threads.flatMap((t) => t.exchanges).find((e) => e.key === exKey);
+    const ex = findExchange(get(), exKey);
     if (!ex) return;
+    hangUp(exKey);
     set((s) => ({
       threads: s.threads.map((t) => ({
         ...t,
@@ -515,6 +581,16 @@ export const useChat = create<ChatState>((set, get) => ({
     // A structural event (verdict, agent_answer, answer_done, done…) must see the streamed text
     // already applied, so drain the token buffer for this exchange first.
     if (event !== "agent_token" && event !== "lead_token") flushTokensFor(exKey);
+    // The first event after a re-attach is the start of the server's full replay. Start from a
+    // blank exchange: resetting only the log and the checks left everything append-only —
+    // retractions, conflicts, notes, artifacts, the lead's streamed text — to be applied twice.
+    if (findExchange(get(), exKey)?.resync) {
+      patch(set, exKey, (cur) => ({
+        ...freshExchange(cur.question, cur.mode),
+        key: cur.key, queryId: cur.queryId, startedAt: cur.startedAt, workspace: cur.workspace,
+        resync: false,
+      }));
+    }
     switch (event) {
       case "meta":
         return patch(set, exKey, () => ({
@@ -758,11 +834,16 @@ export const useChat = create<ChatState>((set, get) => ({
         }));
 
       case "error":
-        return patch(set, exKey, (ex) => ({
+        patch(set, exKey, (ex) => ({
           notes: [...ex.notes, d],
           log: note(ex, "warn", String(d.message ?? "").slice(0, 70), d.scope),
           ...(d.scope === "run" ? { phase: "error" as RunPhase } : {}),
         }));
+        // A run-level error is terminal, like `done`, so it is persisted at once. Left to the
+        // debounced save, a reload within 15s restored the in-flight snapshot and a FAILED run
+        // came back as "interrupted".
+        if (d?.scope === "run") saveThreads(get().threads);
+        return;
 
       case "done":
         patch(set, exKey, (ex) => ({

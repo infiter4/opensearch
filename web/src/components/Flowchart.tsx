@@ -5,19 +5,20 @@ import type { Exchange } from "../state/chat";
  * out as a readable tree instead of a cloud. Same data, two senses — the graph is for exploring,
  * this is for reading and for a screenshot.
  *
+ * Drawn the way the rest of the page draws: a thing is a point, a relationship is a hairline.
  * Hand-rolled SVG: a layout library for a tree this small is a dependency and a build risk. */
 
 interface Node { id: string; label: string; type: string }
 interface Link { source: string; target: string; label: string }
-interface Concept { nodes: Node[]; links: Link[]; pending?: boolean }
+interface Concept { nodes: Node[]; links: Link[]; pending?: boolean; error?: string }
 
 const TONE: Record<string, string> = {
-  root: "#E0912A", entity: "#E7E1D4", value: "#7FB2C4", concept: "#8A94A0",
+  root: "var(--signal)", entity: "var(--ink)", value: "var(--cobalt)", concept: "var(--mute)",
 };
 
-const COL_W = 250;
+const COL_W = 236;
 const ROW_H = 34;
-const PAD = 14;
+const PAD = 18;
 
 export function Flowchart({ ex }: { ex: Exchange }) {
   const [data, setData] = useState<Concept | null>(null);
@@ -27,7 +28,7 @@ export function Flowchart({ ex }: { ex: Exchange }) {
     if (!ex.queryId) { setErr("this conversation is too old to chart — ask again"); return; }
     let dead = false;
     fetch(`/api/concept?query_id=${ex.queryId}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status === 404 ? "the server no longer has this run — ask again to chart it" : `HTTP ${r.status}`))))
       .then((d) => { if (!dead) setData(d); })
       .catch((e) => { if (!dead) setErr(String(e.message ?? e)); });
     return () => { dead = true; };
@@ -77,36 +78,36 @@ export function Flowchart({ ex }: { ex: Exchange }) {
     };
   }, [data]);
 
-  if (err) return <div className="label !text-amber">could not build the chart: {err}</div>;
+  if (err) return <div className="label !text-signal">could not build the chart: {err}</div>;
   if (!data) return <div className="label live-dot">reading the answer…</div>;
   if (data.pending) return <div className="label">the answer is not finished yet</div>;
+  if (data.error) return <div className="label !text-signal">could not build the chart: {data.error} — reopen to try again</div>;
   if (!laid) return <div className="label">nothing to chart in this answer</div>;
 
-  const BOX_W = COL_W - 60;
+  const TEXT_W = COL_W - 56;   // where a node's label ends and its outgoing line begins
 
   return (
-    <div className="overflow-x-auto">
-      <div className="label mb-2">{data.nodes.length} things · {data.links.length} relationships</div>
+    <div data-testid="flowchart" className="overflow-x-auto">
+      <div className="label mb-3 flex flex-wrap items-center gap-x-5 gap-y-1">
+        <span>{data.nodes.length} things · {data.links.length} relationships</span>
+        <span className="flex-1" />
+        <Key color="var(--signal)" label="subject" />
+        <Key color="var(--ink)" label="entity" />
+        <Key color="var(--cobalt)" label="value" />
+      </div>
       <svg viewBox={`0 0 ${laid.w} ${laid.h}`} width="100%" height={laid.h}
-           style={{ minWidth: Math.min(laid.w, 900) }}>
-        <defs>
-          <marker id="fc-arr" viewBox="0 0 8 8" refX={7} refY={4} markerWidth={6} markerHeight={6} orient="auto">
-            <path d="M 0 0 L 8 4 L 0 8 z" fill="rgba(231,225,212,0.4)" />
-          </marker>
-        </defs>
-
+           style={{ minWidth: Math.min(laid.w, 880) }} className="fade">
         {laid.links.map((l, i) => {
           const a = laid.pos.get(l.source)!, b = laid.pos.get(l.target)!;
-          const x1 = a.x + BOX_W, x2 = b.x;
+          const x1 = a.x + TEXT_W, x2 = b.x - 8;
           // Diagonal bezier — an orthogonal elbow reads as a wiring diagram, not a knowledge map.
-          const d = `M ${x1} ${a.y} C ${x1 + 34} ${a.y}, ${x2 - 34} ${b.y}, ${x2} ${b.y}`;
+          const d = `M ${x1} ${a.y} C ${x1 + 40} ${a.y}, ${x2 - 40} ${b.y}, ${x2} ${b.y}`;
           return (
             <g key={i}>
-              <path d={d} fill="none" stroke="rgba(231,225,212,0.22)" strokeWidth={1.2}
-                    markerEnd="url(#fc-arr)" />
+              <path d={d} fill="none" stroke="var(--line-2)" strokeWidth={1} />
               {l.label && (
-                <text x={(x1 + x2) / 2} y={(a.y + b.y) / 2 - 4} textAnchor="middle"
-                      fontSize={8} fill="var(--slate)" fontFamily="var(--font-mono)">
+                <text x={(x1 + x2) / 2} y={(a.y + b.y) / 2 - 5} textAnchor="middle"
+                      fontSize={8.5} fill="var(--faint)" fontFamily="var(--font-mono)">
                   {l.label}
                 </text>
               )}
@@ -116,20 +117,29 @@ export function Flowchart({ ex }: { ex: Exchange }) {
 
         {[...laid.pos].map(([id, p]) => {
           const n = laid.byId.get(id)!;
-          const tone = TONE[n.type] ?? "#8A94A0";
+          const tone = TONE[n.type] ?? "var(--mute)";
+          const root = n.type === "root";
           return (
             <g key={id}>
-              <rect x={p.x} y={p.y - 11} width={BOX_W} height={22} rx={3}
-                    fill="var(--ground-2)" stroke={n.type === "root" ? tone : "var(--rule-2)"}
-                    strokeWidth={n.type === "root" ? 1.4 : 1} />
-              <text x={p.x + 8} y={p.y + 3.5} fontSize={9.5} fill={tone}
-                    fontFamily="var(--font-mono)" fontWeight={n.type === "root" ? 700 : 400}>
-                {n.label.length > 30 ? n.label.slice(0, 29) + "…" : n.label}
+              <circle cx={p.x} cy={p.y} r={root ? 6 : 3.5} fill={tone} />
+              {root && <circle cx={p.x} cy={p.y} r={11} fill="none" stroke="var(--signal)" strokeWidth={0.8} />}
+              <text x={p.x + (root ? 18 : 11)} y={p.y + 3.5} fontSize={root ? 12 : 10.5} fill={root ? "var(--ink)" : tone}
+                    fontFamily={root ? "var(--font-display)" : "var(--font-mono)"} fontWeight={root ? 500 : 400}>
+                {n.label.length > 26 ? n.label.slice(0, 25) + "…" : n.label}
               </text>
             </g>
           );
         })}
       </svg>
     </div>
+  );
+}
+
+function Key({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5 !text-faint">
+      <span className="w-[6px] h-[6px] rounded-full" style={{ background: color }} />
+      {label}
+    </span>
   );
 }

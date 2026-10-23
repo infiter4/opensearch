@@ -423,8 +423,18 @@ web/src/
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q       # 80 tests
+.venv/bin/python -m pytest tests/ -q       # 181 tests, hermetic: no network, no live model calls
+cd web && node e2e.mjs                     # drives the real UI in Chromium (vite :5173 + backend :8000)
+cd web && E2E_REPLAY=1 node e2e.mjs flow   # same, asking only recorded questions (RESEARCH_MODE=replay)
 ```
+
+`e2e.mjs` suites: `boot errors flow stop reload task mobile deep`. `boot`, `errors` and `mobile`
+never start a paid run (failures are simulated in the browser); the rest make real calls unless
+the backend replays.
+
+- `test_*_fixes_*` — one regression test per bug from the pipeline and infrastructure bug hunts
+  (citation placement, code spans, grouped markers, quote prefixes, stop/cancel, sandbox env and
+  process groups, secret scrubbing, cache poisoning, SSE resume, origin checks, …).
 
 - `test_renumber` — shared URLs collapse to one id; invented markers dropped, not guessed; offsets round-trip.
 - `test_segment` / `test_respan` — `txt[s.start:s.end] == s.text` always; sentence ids survive retraction.

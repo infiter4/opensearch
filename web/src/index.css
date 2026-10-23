@@ -1,180 +1,253 @@
 @import "tailwindcss";
 
 /* ————————————————————————————————————————————————————————————
-   receipts.
-   Research agents search and cite. Then an independent model checks
-   every sentence against the source it cites, and must quote the
-   words that support it. What checks out is kept. What doesn't is
-   corrected — or withdrawn, and shown anyway.
+   receipts — a catalogue of checked claims.
 
-   One accent. Verified is SILENT (a plain rule under the words);
-   only trouble earns amber. The five states are told by the SHAPE
-   of the rule — solid / dashed / dotted / double / struck — so the
-   story survives a bad projector and any colour vision.
+   Paper, ink, and one vermilion. Verified is QUIET (a hairline under
+   the words); only trouble earns the red. The five states are told by
+   the SHAPE of the line — solid / dashed / dotted / double / struck —
+   so the story survives a bad projector and any colour vision.
+
+   The abstract figures (rings, arcs, dots, hairlines) are that same
+   vocabulary drawn large: a source is a point, a citation is a line,
+   and the line's style is its verdict.
    ———————————————————————————————————————————————————————————— */
 
 @theme inline {
-  --font-serif: Georgia, "Times New Roman", serif;
-  --font-mono: "Courier New", ui-monospace, monospace;
+  --font-display: "Fraunces Variable", "Iowan Old Style", Georgia, serif;
+  --font-serif: "Newsreader Variable", "Iowan Old Style", Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
 
   --color-ground: var(--ground);
-  --color-ground-2: var(--ground-2);
-  --color-paper: var(--paper);
-  --color-slate: var(--slate);
-  --color-amber: var(--amber);
-  --color-rule: var(--rule);
+  --color-raised: var(--raised);
+  --color-ink: var(--ink);
+  --color-mute: var(--mute);
+  --color-faint: var(--faint);
+  --color-signal: var(--signal);
+  --color-cobalt: var(--cobalt);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
 }
 
+/* light: bone paper */
 :root {
-  --ground: #12191E;          /* ink-blue dark */
-  --ground-2: #161E24;        /* raised surface */
-  --paper: #E7E1D4;           /* warm newsprint */
-  --slate: #8A94A0;           /* muted chrome */
-  --amber: #E0912A;           /* the one accent — trouble, and links */
-  --sel: #2E2517;
-  --rule: rgba(231, 225, 212, 0.12);
-  --rule-2: rgba(231, 225, 212, 0.25);
+  color-scheme: light;
+  --ground: #F2EFE8;
+  --raised: #EAE6DC;
+  --ink: #17160F;
+  --mute: #6C685E;
+  --faint: #A29D90;
+  --line: rgb(23 22 15 / 0.11);
+  --line-2: rgb(23 22 15 / 0.24);
+  --signal: #E2401C;
+  --sel: #F6D8C8;
+  --cobalt: #2747D0;
+  --scrim: rgb(242 239 232 / 0.74);
+  --grain: 0.055;
 }
 
+/* dark: lamp-black. Twice, because a media query cannot share a block with an attribute selector:
+   once for the system preference (unless the reader chose light), once for an explicit choice. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #0F0F0C;
+    --raised: #181814;
+    --ink: #ECE8DD;
+    --mute: #938E82;
+    --faint: #5C584F;
+    --line: rgb(236 232 221 / 0.10);
+    --line-2: rgb(236 232 221 / 0.22);
+    --signal: #FF5B36;
+    --sel: #3B1E14;
+    --cobalt: #8098FF;
+    --scrim: rgb(15 15 12 / 0.74);
+    --grain: 0.08;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #0F0F0C;
+  --raised: #181814;
+  --ink: #ECE8DD;
+  --mute: #938E82;
+  --faint: #5C584F;
+  --line: rgb(236 232 221 / 0.10);
+  --line-2: rgb(236 232 221 / 0.22);
+  --signal: #FF5B36;
+  --sel: #3B1E14;
+  --cobalt: #8098FF;
+  --scrim: rgb(15 15 12 / 0.74);
+  --grain: 0.08;
+}
+
+@layer base {
 * { box-sizing: border-box; }
 
 html, body {
   margin: 0;
   background: var(--ground);
-  color: var(--paper);
+  color: var(--ink);
   font-family: var(--font-serif);
+  font-optical-sizing: auto;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-::selection { background: var(--sel); color: var(--paper); }
-::placeholder { color: rgba(231, 225, 212, 0.3); font-style: italic; }
-* { scrollbar-width: thin; scrollbar-color: rgba(231, 225, 212, 0.14) transparent; }
+/* Paper grain. Fixed, inert, and faint enough that you feel it before you see it. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+  opacity: var(--grain);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.5  0 0 0 0 0.5  0 0 0 0 0.5  0 0 0 1.2 -0.1'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
 
-a { color: var(--amber); text-decoration: none; cursor: pointer; }
-a:hover { border-bottom: 1px solid var(--amber); }
+::selection { background: var(--sel); color: var(--ink); }
+* { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
+:focus-visible { outline: 1px solid var(--signal); outline-offset: 3px; }
+
+a { color: var(--signal); text-decoration: none; cursor: pointer; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+mark {
+  background: var(--sel);
+  color: var(--ink);
+  box-shadow: inset 0 -1px 0 var(--signal);
+  padding: 1px 0;
+}
+}
+
+/* Component classes live in a layer so Tailwind utilities (lg:animate-none, !text-…) can override
+   them. Unlayered CSS beats every layered rule, whatever its specificity. */
+@layer components {
+
+.display { font-family: var(--font-display); font-variation-settings: "opsz" 144, "SOFT" 40, "WONK" 0; }
 
 /* ——— the five marks ——————————————————————————————————————— */
 
-.mk-supported    { text-decoration: underline solid rgba(231, 225, 212, 0.75) 1px; }
-.mk-weak         { text-decoration: underline dashed rgba(231, 225, 212, 0.5) 1px; }
-.mk-unsupported  { text-decoration: underline dotted rgba(231, 225, 212, 0.5) 2px; }
-.mk-contradicted { text-decoration: underline double var(--amber) 1px; }
-.mk-retracted    { text-decoration: line-through solid var(--amber) 1px; opacity: 0.55; }
-.mk-pending      { text-decoration: underline dotted rgba(231, 225, 212, 0.18) 1px; }
-.mk { text-underline-offset: 5px; }
+.mk { text-underline-offset: 0.3em; text-decoration-skip-ink: auto; transition: background-color 0.2s; }
+.mk-supported    { text-decoration: underline solid color-mix(in oklab, var(--ink) 50%, transparent) 1px; }
+.mk-weak         { text-decoration: underline dashed color-mix(in oklab, var(--ink) 45%, transparent) 1px; }
+.mk-unsupported  { text-decoration: underline dotted color-mix(in oklab, var(--ink) 60%, transparent) 2px; }
+.mk-contradicted { text-decoration: underline double var(--signal) 1px; }
+.mk-retracted    { text-decoration: line-through solid var(--signal) 1px; opacity: 0.5; }
+.mk-pending      { text-decoration: underline dotted color-mix(in oklab, var(--ink) 18%, transparent) 1px; }
 
-.mk-focus { background: var(--sel); box-shadow: 0 0 0 4px var(--sel); }
+.mk-focus { background: var(--sel); box-shadow: 0 0 0 3px var(--sel); border-radius: 2px; }
 
 /* the sentence being corrected breathes */
-.mk-repairing { animation: pulse 1.3s ease-in-out infinite; }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.mk-repairing { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
-/* a corrected sentence arrives with one amber flash, then settles */
+/* a corrected sentence arrives with one warm flash, then settles */
 .mk-healed { animation: settle 1.8s ease-out; }
-@keyframes settle {
-  0% { background: rgba(224, 145, 42, 0.22); }
-  100% { background: transparent; }
-}
+@keyframes settle { 0% { background: var(--sel); } 100% { background: transparent; } }
 
-/* ——— citation chips: pinned quotes ————————————————————————— */
+/* ——— citation chips ———————————————————————————————————————— */
 .cite {
   font-family: var(--font-mono);
-  font-size: 0.68em;
-  vertical-align: 0.4em;
+  font-size: 0.6em;
+  font-weight: 500;
+  vertical-align: 0.55em;
   line-height: 1;
-  padding: 0 2px;
+  padding: 1px 3px;
   margin-left: 1px;
-  color: var(--amber);
+  color: var(--signal);
   background: none;
   border: none;
-  border-bottom: 1px solid transparent;
+  border-radius: 2px;
   cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
 }
-.cite:hover { border-bottom-color: var(--amber); }
+.cite:hover { background: var(--signal); color: var(--ground); }
 
 /* ——— chrome ——————————————————————————————————————————————— */
 .label {
   font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--slate);
+  color: var(--mute);
 }
 
-.rule-t { border-top: 1px solid var(--rule); }
-.rule-b { border-bottom: 1px solid var(--rule); }
+.rule-t { border-top: 1px solid var(--line); }
+.rule-b { border-bottom: 1px solid var(--line); }
 
-/* activity log ticks in */
+/* entrances */
+.rise { animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 .tick { animation: fadein 0.35s ease-out; }
-@keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.slide-in { animation: slide 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes slide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+.slide-in-left { animation: slide-left 0.28s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes slide-left { from { transform: translateX(-18px); opacity: 0; } to { transform: none; opacity: 1; } }
+.fade { animation: fade 0.25s ease-out both; }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
 .live-dot { animation: blink 1.1s steps(2) infinite; }
 @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.15; } }
+
+.spin { animation: spin 2.6s linear infinite; transform-origin: center; transform-box: fill-box; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* the hero figure turns, slowly enough that you only notice it has moved */
+.drift { animation: drift 240s linear infinite; transform-origin: 380px 260px; }
+@keyframes drift { to { transform: rotate(360deg); } }
+.draw { stroke-dasharray: var(--len); stroke-dashoffset: var(--len); animation: draw 1.6s cubic-bezier(0.6, 0, 0.2, 1) forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
 
 /* the pen, while copy is still being set */
 .setting > *:last-child::after {
   content: "";
   display: inline-block;
-  width: 7px; height: 1em;
-  margin-left: 3px;
-  vertical-align: text-bottom;
-  background: var(--amber);
+  width: 0.5em; height: 0.5em;
+  margin-left: 0.35em;
+  border-radius: 50%;
+  background: var(--signal);
+  vertical-align: 0.05em;
   animation: blink 1s steps(2) infinite;
-}
-
-/* ——— the verification matrix ——————————————————————————————— */
-.cellbox {
-  width: 16px; height: 16px;
-  display: grid;
-  place-items: center;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1;
-  color: var(--slate);
-  cursor: pointer;
-  border: 1px solid transparent;
-}
-.cellbox:hover { border-color: var(--rule-2); }
-.cell-in { animation: fadein 0.25s ease-out; }
-
-mark {
-  background: var(--sel);
-  color: var(--paper);
-  border-bottom: 1px solid var(--amber);
-  padding: 1px 0;
 }
 
 /* ——— math ————————————————————————————————————————————————————— */
 /* KaTeX ships its own colours and sizing; make it sit in our type instead of on top of it. */
-.katex { color: var(--paper); font-size: 1.02em; }
+.katex { color: inherit; font-size: 1em; }
 .katex-display { margin: 0.7em 0; overflow-x: auto; overflow-y: hidden; }
 .katex-host { display: inline; }
-.katex-error { color: var(--amber); }
+.katex-error { color: var(--signal); }
 
 /* ——— tooltips: pure CSS ——————————————————————————————————— */
 [data-note] { position: relative; }
 [data-note]:hover::after {
   content: attr(data-note);
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 60;
   width: max-content;
-  max-width: 320px;
-  padding: 7px 9px;
+  max-width: min(320px, 80vw);
+  padding: 7px 10px;
   font-family: var(--font-mono);
   font-size: 10.5px;
+  font-weight: 400;
   line-height: 1.5;
   letter-spacing: 0;
   text-transform: none;
+  text-decoration: none;
   white-space: pre-line;
-  color: var(--paper);
-  background: #0B1015;
-  border: 1px solid var(--rule-2);
+  color: var(--ground);
+  background: var(--ink);
+  border-radius: 3px;
   pointer-events: none;
+  animation: fade 0.15s ease-out 0.25s both;
+}
+
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * { animation-duration: 0.001s !important; animation-iteration-count: 1 !important; }
+  * { animation-duration: 0.001s !important; animation-iteration-count: 1 !important; transition: none !important; }
 }

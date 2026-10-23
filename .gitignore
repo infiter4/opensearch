@@ -23,3 +23,6 @@ data/cache.sqlite.part
 data/artifacts/
 # test drivers are committed — they are how the UI gets verified
 .~lock.*#
+
+# e2e.mjs screenshots (SHOTS=dir to put them elsewhere)
+web/e2e-shots/

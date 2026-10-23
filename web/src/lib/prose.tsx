@@ -82,7 +82,7 @@ function inline(text: string, sid: string, onCite: ProseProps["onCite"]): ReactN
       out.push(<strong key={`b${k++}`}>{tok.slice(2, -2)}</strong>);
     } else if (tok.startsWith("`")) {
       out.push(
-        <code key={`k${k++}`} className="font-mono text-[0.82em] bg-ground-2 px-1 py-px rounded border border-[var(--rule)]">
+        <code key={`k${k++}`} className="font-mono text-[0.8em] bg-raised px-1 py-px rounded-[2px]">
           {tok.slice(1, -1)}
         </code>,
       );
@@ -125,14 +125,14 @@ function Line({ s, raw, d, onCite, onFocus }: {
   const h = body.match(/^(#{1,6})\s+/);
   if (h) {
     body = body.slice(h[0].length);
-    cls += " block font-semibold text-[1.12em] mt-4 mb-1";
+    cls += " block display font-[450] text-[1.16em] tracking-[-0.01em] mt-6 mb-1.5";
   } else if (/^[-*+]\s/.test(body)) {
     body = body.replace(/^[-*+]\s/, "");
-    prefix = <span className="text-slate select-none">&thinsp;•&ensp;</span>;
+    prefix = <span className="text-faint select-none">&thinsp;—&ensp;</span>;
   } else if (/^\d+\.\s/.test(body)) {
     const n = body.match(/^(\d+)\.\s/)!;
     body = body.slice(n[0].length);
-    prefix = <span className="text-slate font-mono text-[0.85em] select-none">{n[1]}.&ensp;</span>;
+    prefix = <span className="text-faint font-mono text-[0.78em] select-none">{n[1]}.&ensp;</span>;
   }
 
 
@@ -163,12 +163,15 @@ function Table({ rows, dress, onCite }: {
   const body = rows.filter((r) => !isRule(r.raw));
   if (!body.length) return null;
   const [head, ...rest] = body;
+  // A price table is often wider than a phone. It scrolls inside its own box; it must never push
+  // the whole page sideways.
   return (
-    <table className="my-3 text-[0.84em] border-collapse w-full">
+    <div className="my-4 overflow-x-auto">
+    <table className="text-[0.84em] border-collapse w-full">
       <thead>
-        <tr className="border-b border-[var(--rule)]">
+        <tr className="border-b border-line-2">
           {cells(head.raw).map((c, i) => (
-            <th key={i} className="text-left font-semibold py-1 pr-4 label !text-[9px]">{c}</th>
+            <th key={i} className="text-left font-normal py-1.5 pr-4 label !text-[9px]">{c}</th>
           ))}
         </tr>
       </thead>
@@ -176,10 +179,10 @@ function Table({ rows, dress, onCite }: {
         {rest.map((r) => {
           const d = dress(r.s);
           return (
-            <tr key={r.s.id} className="border-b border-[var(--rule)]/50" data-note={d.note}>
+            <tr key={r.s.id} className="border-b border-line" data-note={d.note}>
               {cells(r.raw).map((c, i) => (
                 <td key={i}
-                    className={`py-1 pr-4 ${i === 0 ? "font-medium" : "font-mono text-[0.92em] text-paper/70"}
+                    className={`py-1.5 pr-4 ${i === 0 ? "" : "font-mono text-[0.9em] text-ink/70"}
                                 ${d.verdict ? `mk mk-${d.verdict}` : ""}`}>
                   {inline(c, r.s.id, onCite)}
                 </td>
@@ -189,6 +192,7 @@ function Table({ rows, dress, onCite }: {
         })}
       </tbody>
     </table>
+    </div>
   );
 }
 
@@ -248,7 +252,7 @@ export function Prose({ text, sentences, dress, onCite, onFocus }: ProseProps) {
     i++;
   }
 
-  return <div className="leading-[1.85]">{parts}</div>;
+  return <div>{parts}</div>;
 }
 
 // The old `stripCites` streaming fallback is gone: it rendered chips but dumped every other bit of

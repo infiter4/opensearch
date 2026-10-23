@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { MARK, worstOf, type LedgerRow, type Verdict } from "../lib/protocol";
+import { VerdictShape } from "../lib/shapes";
 import { checkKey, useChat, type Exchange } from "../state/chat";
 
 /* Every claim against every source it cited. Sparse on purpose: a blank cell means
@@ -7,12 +8,10 @@ import { checkKey, useChat, type Exchange } from "../state/chat";
    the researchers working independently; a mark outside its block is two researchers landing on the
    same source on their own — corroboration you can point at. */
 
-function tone(v: Verdict): string {
-  return v === "contradicted" || v === "retracted" ? "text-amber" : "text-paper/70";
-}
-
 export function Grid({ ex, showDraft }: { ex: Exchange; showDraft: boolean }) {
-  const { viewSource, focus, focusSentence } = useChat();
+  const viewSource = useChat((s) => s.viewSource);
+  const focus = useChat((s) => s.focus);
+  const focusSentence = useChat((s) => s.focusSentence);
   const checks = showDraft ? ex.draft : ex.checks;
 
   const rows = useMemo<LedgerRow[]>(
@@ -30,22 +29,30 @@ export function Grid({ ex, showDraft }: { ex: Exchange; showDraft: boolean }) {
   if (!rows.length || !cols.length) return null;
 
   return (
-    <div>
-      <div className="label rule-b pb-1.5 mb-2">verification matrix — claim × source</div>
-      <div className="overflow-x-auto">
-        <table className="border-separate" style={{ borderSpacing: 2 }}>
+    <div data-testid="matrix">
+      <div className="label mb-4 flex flex-wrap items-center gap-x-5 gap-y-2">
+        <span>verification matrix — claim × source</span>
+        <span className="flex-1" />
+        {(["supported", "weak", "unsupported", "contradicted", "retracted"] as Verdict[]).map((v) => (
+          <span key={v} className="flex items-center gap-1.5 !text-faint normal-case tracking-normal">
+            <span className="text-ink/70"><VerdictShape v={v} size={9} /></span>{MARK[v].word}
+          </span>
+        ))}
+      </div>
+      <div className="overflow-x-auto pb-1">
+        <table className="border-separate" style={{ borderSpacing: 3 }}>
           <thead>
             <tr>
               <td />
               {cols.map((c) => (
                 <td key={c.id} className="align-bottom">
                   <button
-                    className="label !text-[9px] hover:!text-paper block max-h-20 overflow-hidden"
+                    className="font-mono text-[9px] text-faint hover:text-ink block max-h-24 overflow-hidden transition-colors"
                     style={{ writingMode: "vertical-rl" }}
                     data-note={c.title || c.url}
                     onClick={() => viewSource(ex.key, c.id)}
                   >
-                    {c.id} {c.domain?.replace(/^www\./, "").slice(0, 14)}
+                    {c.id} {c.domain?.replace(/^www\./, "").slice(0, 16)}
                   </button>
                 </td>
               ))}
@@ -61,16 +68,12 @@ export function Grid({ ex, showDraft }: { ex: Exchange; showDraft: boolean }) {
               return (
                 <tr key={r.sentence_id}>
                   <td
-                    className={`pr-3 max-w-[290px] cursor-pointer ${on ? "bg-[var(--sel)]" : ""}`}
+                    className={`pr-4 max-w-[300px] cursor-pointer rounded-[2px] ${on ? "bg-[var(--sel)]" : "hover:bg-raised"}`}
                     onClick={() => focus(on ? null : r.sentence_id)}
                   >
-                    <div className="flex items-baseline gap-2">
-                      <span className="font-mono text-[9px] text-slate/70 shrink-0">{r.agent_id}</span>
-                      <span
-                        className={`font-mono text-[10px] truncate ${
-                          wv === "retracted" ? "line-through text-slate/60" : "text-paper/60"
-                        }`}
-                      >
+                    <div className="flex items-baseline gap-2.5 px-1">
+                      <span className="font-mono text-[9px] text-faint shrink-0">{r.agent_id}</span>
+                      <span className={`text-[12.5px] truncate ${wv === "retracted" ? "line-through text-faint" : "text-ink/70"}`}>
                         {r.text}
                       </span>
                     </div>
@@ -80,7 +83,9 @@ export function Grid({ ex, showDraft }: { ex: Exchange; showDraft: boolean }) {
                     if (!ch) {
                       return (
                         <td key={c.id}>
-                          <div className="w-4 text-center text-slate/20 select-none font-mono text-[10px]">·</div>
+                          <div className="w-[18px] h-[18px] grid place-items-center select-none">
+                            <span className="w-[2px] h-[2px] rounded-full bg-faint/60" />
+                          </div>
                         </td>
                       );
                     }
@@ -88,11 +93,13 @@ export function Grid({ ex, showDraft }: { ex: Exchange; showDraft: boolean }) {
                     return (
                       <td key={c.id}>
                         <button
-                          className={`cellbox cell-in ${tone(v)}`}
+                          data-testid="matrix-cell"
+                          className="w-[18px] h-[18px] grid place-items-center rounded-[2px] text-ink/75 hover:bg-raised hover:text-ink tick transition-colors"
                           data-note={`${MARK[v].word} — ${MARK[v].note}${ch.reason ? `\n\n${ch.reason.slice(0, 150)}` : ""}`}
+                          aria-label={MARK[v].word}
                           onClick={() => viewSource(ex.key, c.id, ch.quote)}
                         >
-                          {MARK[v].glyph}
+                          <VerdictShape v={v} />
                         </button>
                       </td>
                     );

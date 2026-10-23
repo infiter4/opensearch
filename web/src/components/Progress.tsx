@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Exchange } from "../state/chat";
+import { isLive, type Exchange } from "../state/chat";
 
 /* What is actually happening, with a denominator.
    Checking is the long pole: a deep run extracts ~350 claims and checks each against the page it
@@ -11,7 +11,7 @@ const STALL_S = 12;
 
 export function Progress({ ex }: { ex: Exchange }) {
   const [, tick] = useState(0);
-  const running = ex.phase !== "done" && ex.phase !== "error";
+  const running = isLive(ex.phase);
 
   // Re-render on a timer: the stall counter is time-based, not event-based. Nothing else would
   // wake this component while the provider is silent — which is precisely when it matters.
@@ -36,56 +36,66 @@ export function Progress({ ex }: { ex: Exchange }) {
     : "done";
 
   return (
-    <div className="space-y-2">
-      <div className="label">{stage}</div>
-
-      <div className="label !text-[9px] text-slate">
-        {Object.keys(ex.sources).length} sources
+    <div data-testid="progress" className="space-y-4">
+      <div className="flex items-center gap-3">
+        {running && <Orbit />}
+        <span className="text-[16px] italic">{stage}</span>
       </div>
 
-      {totalClaims > 0 && (
-        <>
-          <div className="font-mono text-[11px] text-paper/80">
-            {checked} / {totalClaims} claims
-          </div>
-          {/* A bar, not a spinner: a spinner tells you nothing, a bar tells you where you are. */}
-          <div className="h-[3px] bg-[var(--rule)] w-full">
-            <div
-              className="h-full bg-amber transition-[width] duration-500"
-              style={{ width: `${pct}%` }}
-            />
-          </div>
-          <div className="label !text-[9px]">{pct}% checked</div>
-        </>
-      )}
+      <div className="label !text-faint">{Object.keys(ex.sources).length} sources</div>
 
-      {!totalClaims && running && (
-        <div className="font-mono text-[11px] text-slate">
-          {Object.keys(ex.checks).length} checked
+      {totalClaims > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between font-mono text-[11px] text-ink/80 tabular-nums">
+            <span>{checked} / {totalClaims} claims</span>
+            <span className="text-faint">{pct}%</span>
+          </div>
+          {/* A line, not a spinner: a spinner tells you nothing, a line tells you where you are. */}
+          <div className="relative h-px bg-line-2 w-full">
+            <div className="absolute left-0 -top-px h-[3px] bg-signal transition-[width] duration-700" style={{ width: `${pct}%` }} />
+            <div className="absolute -top-[3px] w-[7px] h-[7px] rounded-full bg-signal -translate-x-1/2 transition-[left] duration-700"
+                 style={{ left: `${pct}%` }} />
+          </div>
         </div>
       )}
 
+      {!totalClaims && running && (
+        <div className="font-mono text-[11px] text-mute">{Object.keys(ex.checks).length} checked</div>
+      )}
+
       {ex.repairing.size > 0 && (
-        <div className="label !text-amber !text-[9px]">{ex.repairing.size} being corrected</div>
+        <div className="label !text-signal !text-[9px]">{ex.repairing.size} being corrected</div>
       )}
 
       {stalled && (
         <div className="pt-1 min-w-0">
-          <div className="label !text-amber">no response for {quiet}s</div>
+          <div className="label !text-signal">no response for {quiet}s</div>
           {/* The provider error, verbatim but CONTAINED. A 429 body is long and unbroken; without
               min-w-0 + wrapping + a line clamp it spilled over the answer beside it. */}
           {lastWarn ? (
             <div
-              className="font-mono text-[9.5px] text-amber/80 mt-1 leading-relaxed line-clamp-4 overflow-hidden break-words [overflow-wrap:anywhere]"
+              className="font-mono text-[10px] text-signal/80 mt-1.5 leading-relaxed line-clamp-4 overflow-hidden break-words [overflow-wrap:anywhere]"
               data-note={lastWarn.what}
             >
               {lastWarn.what}
             </div>
           ) : (
-            <div className="label text-slate mt-1">waiting on the provider — retrying with backoff</div>
+            <div className="text-[13px] italic text-mute mt-1">waiting on the provider — retrying with backoff</div>
           )}
         </div>
       )}
     </div>
+  );
+}
+
+/** A point circling a ring: alive, without pretending to know how long. */
+function Orbit() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+      <circle cx="8" cy="8" r="6" fill="none" stroke="var(--line-2)" strokeWidth="1" />
+      <g className="spin" style={{ transformOrigin: "8px 8px", transformBox: "view-box" }}>
+        <circle cx="8" cy="2" r="2" fill="var(--signal)" />
+      </g>
+    </svg>
   );
 }

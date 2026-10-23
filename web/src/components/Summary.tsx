@@ -1,4 +1,5 @@
 import { MARK, tallyOf, type Verdict } from "../lib/protocol";
+import { Sigil, VerdictShape } from "../lib/shapes";
 import type { Exchange } from "../state/chat";
 
 /* Verification summary: what held up, what didn't, and the arithmetic between them.
@@ -21,32 +22,37 @@ export function Summary({ ex, draft }: { ex: Exchange; draft: boolean }) {
   const nSources = Object.keys(ex.sources).length;
 
   return (
-    <div>
-      <div className="label rule-b pb-1.5 mb-3">
-        {draft ? "before verification" : "verification"}
-      </div>
+    <div data-testid="summary" className="lg:sticky lg:top-24">
+      <div className="label pb-2 mb-5 rule-b">{draft ? "before verification" : "verification"}</div>
 
-      <div className="flex items-baseline gap-2">
-        <span className={`text-[38px] leading-none ${draft ? "text-amber" : ""}`}>{t.supported}</span>
-        <span className="text-slate text-[20px]">/ {t.total}</span>
-      </div>
-      <div className="text-[13px] text-slate mt-1.5 leading-snug">
-        sentences verified against their sources
-      </div>
-
-      <div className="mt-4 space-y-1">
-        {ORDER.map((v) => (
-          <div key={v} className="flex items-baseline gap-2 font-mono text-[11px]" data-note={MARK[v].note}>
-            <span className={v === "contradicted" || v === "retracted" ? "text-amber w-3" : "text-slate w-3"}>
-              {MARK[v].glyph}
-            </span>
-            <span className="text-paper/75 flex-1">{MARK[v].word}</span>
-            <span className={counts[v] ? "text-paper" : "text-slate/40"}>{counts[v]}</span>
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] lg:grid-cols-1 gap-x-7 gap-y-5 items-center">
+        <div className="relative w-[128px] h-[128px]">
+          <Sigil t={t} size={128} />
+          <div className="absolute inset-0 grid place-items-center pointer-events-none">
+            <div className="flex items-baseline">
+              <span className={`display text-[40px] leading-none font-[380] ${draft ? "text-signal" : ""}`}>{t.supported}</span>
+              <span className="display text-[17px] text-mute ml-0.5">/{t.total}</span>
+            </div>
           </div>
-        ))}
+        </div>
+
+        <div>
+          <div className="text-[14px] italic text-mute leading-snug lg:-mt-1">
+            sentences verified against their sources
+          </div>
+          <div className="mt-4 space-y-[7px]">
+            {ORDER.map((v) => (
+              <div key={v} className="flex items-center gap-2.5 font-mono text-[11px]" data-note={MARK[v].note}>
+                <span className={counts[v] ? "text-ink/80" : "text-faint"}><VerdictShape v={v} /></span>
+                <span className={`flex-1 ${counts[v] ? "text-ink/75" : "text-faint"}`}>{MARK[v].word}</span>
+                <span className={`tabular-nums ${counts[v] ? "text-ink" : "text-faint"}`}>{counts[v]}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
-      <div className="label mt-4 pt-2 rule-t leading-relaxed">
+      <div className="label !text-faint mt-6 pt-3 rule-t leading-relaxed">
         {quotes} quotes · {nSources} sources
         <br />
         checked by an independent model

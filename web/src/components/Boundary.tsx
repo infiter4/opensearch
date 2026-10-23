@@ -17,16 +17,16 @@ export class Boundary extends Component<Props, State> {
   render() {
     if (!this.state.err) return this.props.children;
     return (
-      <div className="my-6 p-4 border border-[var(--rule-2)]">
-        <div className="label !text-amber mb-2">this answer could not be displayed</div>
-        <div className="font-mono text-[11px] text-slate leading-relaxed break-all">
+      <div className="my-10 pl-5 border-l border-signal">
+        <div className="label !text-signal mb-2">this answer could not be displayed</div>
+        <div className="font-mono text-[11px] text-mute leading-relaxed break-all">
           {this.state.err.message}
         </div>
         <button
-          className="label hover:!text-paper mt-3"
+          className="label hover:!text-ink mt-3 transition-colors"
           onClick={() => { this.setState({ err: null }); this.props.onReset?.(); }}
         >
-          ▸ try again
+          try again ↻
         </button>
       </div>
     );

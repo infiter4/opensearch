@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { MARK, tallyOf, worstOf, type SentenceRef, type Verdict } from "../lib/protocol";
 import { Prose, type SentenceDress } from "../lib/prose";
-import { useChat, type Exchange } from "../state/chat";
+import { isLive, useChat, type Exchange } from "../state/chat";
 import { Activity } from "./Activity";
 import { Flowchart } from "./Flowchart";
 import { Graph3D } from "./Graph3D";
@@ -10,15 +10,20 @@ import { ModelViewer } from "./ModelViewer";
 import { Progress } from "./Progress";
 import { Summary } from "./Summary";
 
-export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
-  const { showDraft, toggleDraft, viewSource, focus, focusSentence, retry } = useChat();
-  const [gridOpen, setGridOpen] = useState(false);
-  const [graphOpen, setGraphOpen] = useState(false);
-  const [flowOpen, setFlowOpen] = useState(false);
-  const [logOpen, setLogOpen] = useState(false);
+export function ExchangeView({ ex }: { ex: Exchange; index: number }) {
+  // Narrow selectors: a run streams ~10 events a second, and subscribing to the whole store
+  // re-rendered EVERY exchange on the page — every answer's prose — on each one of them.
+  const draft = useChat((s) => !!s.showDraft[ex.key]);
+  const focusSentence = useChat((s) => s.focusSentence);
+  const toggleDraft = useChat((s) => s.toggleDraft);
+  const viewSource = useChat((s) => s.viewSource);
+  const focus = useChat((s) => s.focus);
+  const retry = useChat((s) => s.retry);
+  const [open, setOpen] = useState<Record<string, boolean>>({});
   const [modelOpen, setModelOpen] = useState<string | null>(null);
-  const draft = !!showDraft[ex.key];
-  const running = ex.phase !== "done" && ex.phase !== "error" && ex.phase !== "interrupted";
+  const flip = (k: string) => setOpen((o) => ({ ...o, [k]: !o[k] }));
+
+  const running = isLive(ex.phase);
   const isTask = ex.kind === "task";   // routed to the doer: no research, no fact-checking chrome
   const checks = draft ? ex.draft : ex.checks;
 
@@ -65,51 +70,72 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
   const nSources = Object.keys(ex.sources).length;
   const fixed = ex.healed.size;
 
+  const meta: ReactNode[] = [
+    <span key="m" className={isTask ? "text-signal" : ""}>{isTask ? "task" : (ex.resolvedMode || ex.mode)}</span>,
+  ];
+  if (ex.workspace) meta.push(<span key="w" className="text-signal" data-note="researched your ingested documents, not the web">corpus: {ex.workspace}</span>);
+  if (isTask && ex.routeTitle) meta.push(<span key="r">{ex.routeTitle}</span>);
+  if (nSources > 0) meta.push(<span key="s">{nSources} {ex.workspace ? "passages" : "sources"}</span>);
+  if (!running && ex.elapsed > 0) meta.push(<span key="e">{Math.round(ex.elapsed)}s</span>);
+  if (ex.cacheMode === "replay") meta.push(<span key="c" className="text-signal">replay</span>);
+
   return (
-    <article className="pt-8 pb-10 rule-b last:border-b-0">
-      <div className="label flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className={isTask ? "text-amber" : ""}>{isTask ? "task" : (ex.resolvedMode || ex.mode)}</span>
-        {ex.workspace && <><span className="text-slate/40">·</span>
-          <span className="text-amber" data-note="researched your ingested documents, not the web">corpus: {ex.workspace}</span></>}
-        {isTask && ex.routeTitle && <><span className="text-slate/40">·</span><span>{ex.routeTitle}</span></>}
-        {nSources > 0 && <><span className="text-slate/40">·</span><span>{nSources} {ex.workspace ? "passages" : "sources"}</span></>}
-        {!running && ex.elapsed > 0 && <><span className="text-slate/40">·</span><span>{Math.round(ex.elapsed)}s</span></>}
-        {ex.cacheMode === "replay" && <><span className="text-slate/40">·</span><span className="text-amber">replay</span></>}
+    <article
+      data-testid="exchange"
+      data-phase={ex.phase}
+      data-kind={ex.kind ?? "research"}
+      className="pt-12 pb-14 border-b border-line last:border-b-0 rise"
+    >
+      <div className="label flex flex-wrap items-center gap-x-2.5 gap-y-1">
+        {meta.map((m, i) => (
+          <span key={i} className="flex items-center gap-2.5">
+            {i > 0 && <span className="w-[3px] h-[3px] rounded-full bg-faint" />}
+            {m}
+          </span>
+        ))}
         <span className="flex-1" />
         {!running && t && (
           <button
-            className={`font-mono text-[10px] tracking-[0.16em] uppercase border px-2.5 py-1 transition-colors ${
-              draft ? "border-amber text-amber" : "border-[var(--rule-2)] text-slate hover:text-paper"
-            }`}
-            data-note="show the first draft, before any corrections"
+            data-testid="draft-toggle"
             onClick={() => toggleDraft(ex.key)}
+            data-note="show the first draft, before any corrections"
+            aria-pressed={draft}
+            className="flex items-center p-[3px] rounded-full border border-line-2 font-mono text-[9.5px] tracking-[0.14em] uppercase"
           >
-            {draft ? "first draft" : "final"}
+            <span className={`px-2.5 py-1 rounded-full transition-colors ${!draft ? "bg-ink text-ground" : "text-faint"}`}>final</span>
+            <span className={`px-2.5 py-1 rounded-full transition-colors ${draft ? "bg-signal text-ground" : "text-faint"}`}>first draft</span>
           </button>
         )}
       </div>
 
-      <h2 className="text-[26px] leading-[1.28] mt-3 max-w-[42ch]">{ex.question}</h2>
+      <h2 className="display font-[350] text-[28px] sm:text-[36px] leading-[1.12] tracking-[-0.018em] mt-4 max-w-[28ch] text-balance">
+        {ex.question}
+      </h2>
 
-      {/* A run cannot be re-attached after a reload — the stream endpoint starts runs, it does not
-          resume them. Say so plainly and offer the one useful action instead of a dead spinner. */}
-      {ex.phase === "interrupted" && (
-        <div className="mt-3 flex items-center gap-3 flex-wrap">
-          <span className="label !text-amber">interrupted by a page reload</span>
+      {/* At rest but unfinished: say which, and offer the one useful action in place. */}
+      {(ex.phase === "interrupted" || ex.phase === "error") && (
+        <div className="mt-5 flex items-center gap-4 flex-wrap">
+          <span className="flex items-center gap-2 label !text-signal">
+            <span className="w-1.5 h-1.5 rounded-full bg-signal" /> {ex.phase === "error" ? "failed" : "interrupted"}
+          </span>
+          <span className="text-[14px] italic text-mute">
+            {ex.phase === "error" ? "the run could not finish — the reason is below" : "the run stopped before it finished"}
+          </span>
           <button
-            className="font-mono text-[10px] tracking-[0.16em] uppercase border border-amber text-amber px-2.5 py-1 hover:bg-amber/10 transition-colors"
+            data-testid="resume"
+            className="label !text-ink border border-line-2 rounded-full px-3 py-1.5 hover:border-ink transition-colors"
             data-note="run it again — most of the work is already cached"
             onClick={() => void retry(ex.key)}
           >
-            resume ↻
+            {ex.phase === "error" ? "try again ↻" : "resume ↻"}
           </button>
         </div>
       )}
 
       {!running && t && (
-        <div className="label mt-2 !text-[10.5px]">
+        <div data-testid="tally" className="mt-3 text-[15px] italic text-mute">
           {draft ? (
-            <span className="text-amber">
+            <span className="text-signal">
               first draft — {draftT.unsupported + draftT.contradicted} of {draftT.total} sentences
               were not supported by the page they cited
             </span>
@@ -124,15 +150,15 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
       )}
 
       {running && (
-        <div className="mt-5 grid gap-6" style={{ gridTemplateColumns: "minmax(0,1fr) 210px" }}>
+        <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_220px]">
           <Activity ex={ex} />
-          <div className="pt-1">{!isTask && <Progress ex={ex} />}</div>
+          {!isTask && <Progress ex={ex} />}
         </div>
       )}
 
       {(ex.answer.text || !running) && (
-        <div className="mt-6 grid gap-10" style={{ gridTemplateColumns: "minmax(0,1fr) 210px" }}>
-          <div className={`text-[16.5px] leading-[1.75] max-w-[64ch] ${running ? "setting" : ""}`}>
+        <div className="mt-8 grid gap-10 lg:gap-14 lg:grid-cols-[minmax(0,1fr)_220px]">
+          <div className={`text-[17.5px] sm:text-[18.5px] leading-[1.72] max-w-[66ch] min-w-0 ${running ? "setting" : ""}`}>
             <Prose
               text={ex.answer.text}
               sentences={ex.answer.sentences}
@@ -141,18 +167,20 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
               onFocus={(sid) => focus(focusSentence === sid ? null : sid)}
             />
           </div>
-          <div className="pt-1">{!running && !isTask && <Summary ex={ex} draft={draft} />}</div>
+          <div>{!running && !isTask && <Summary ex={ex} draft={draft} />}</div>
         </div>
       )}
 
       {/* Sources that disagree with each other. Averaging them away is the failure this product
           exists to prevent, so the conflict is stated rather than quietly resolved. */}
       {!running && ex.conflicts.length > 0 && (
-        <div className="mt-6 rule-t pt-3">
-          <div className="label mb-2">sources disagree</div>
+        <div data-testid="conflicts" className="mt-10 max-w-[66ch]">
+          <div className="label mb-3">sources disagree</div>
           {ex.conflicts.map((c, i) => (
-            <div key={i} className="text-[13.5px] text-paper/75 leading-relaxed mb-1.5 flex gap-2">
-              <span className="text-amber shrink-0">✕</span>
+            <div key={i} className="text-[15px] text-ink/80 leading-relaxed mb-2 flex gap-3 items-baseline">
+              <svg width="9" height="9" viewBox="0 0 10 10" className="shrink-0 translate-y-[1px]" aria-hidden>
+                <path d="M5 0.6 9.4 5 5 9.4 0.6 5Z" fill="var(--signal)" />
+              </svg>
               <span>{c.reason ?? "two cited sources make opposite claims"}</span>
             </div>
           ))}
@@ -160,72 +188,94 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
       )}
 
       {!running && (
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-7">
-          <button className={`label hover:!text-paper ${gridOpen ? "!text-paper" : ""}`}
-                  onClick={() => setGridOpen(!gridOpen)}>
-            {gridOpen ? "▾" : "▸"} verification matrix
-          </button>
-          <button className={`label hover:!text-paper ${logOpen ? "!text-paper" : ""}`}
-                  onClick={() => setLogOpen(!logOpen)}
-                  data-note="every step this run took, with timings">
-            {logOpen ? "▾" : "▸"} activity log ({ex.log?.length ?? 0})
-          </button>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3 mt-10">
+          {/* A task run is not fact-checked: it has no claims, so no matrix to open. */}
+          {!isTask && (
+            <Toggle testid="toggle-matrix" open={!!open.matrix} onClick={() => flip("matrix")}
+                    note="every claim against every source it cited">
+              verification matrix
+            </Toggle>
+          )}
+          <Toggle testid="toggle-log" open={!!open.log} onClick={() => flip("log")}
+                  note="every step this run took, with timings">
+            activity log <span className="text-faint">{ex.log?.length ?? 0}</span>
+          </Toggle>
           {/* Research-only views: a task run has no researchers, sources, or checks to draw. */}
           {!isTask && <>
-          {/* The flowchart is drawn from data this exchange already holds, so it is available for
-              every conversation in every mode — it never needed the backend's graph. */}
-          <button className={`label hover:!text-paper ${flowOpen ? "!text-paper" : ""}`}
-                  onClick={() => setFlowOpen(!flowOpen)}
-                  data-note="the run as a flowchart: question → researchers → sources → checks → answer">
-            {flowOpen ? "▾" : "▸"} flowchart
-          </button>
-          {/* Both views read the ANSWER's own entities and relations, fetched on demand — so they
-              work in every mode and never needed the run's provenance graph. */}
-          <button
-            className={`label hover:!text-paper ${graphOpen ? "!text-paper" : ""}`}
-            onClick={() => setGraphOpen(!graphOpen)}
-            data-note="the answer as a 3D knowledge graph — things it names and how they relate"
-          >
-            {graphOpen ? "▾" : "▸"} knowledge graph
-          </button>
+            <Toggle testid="toggle-flow" open={!!open.flow} onClick={() => flip("flow")}
+                    note="the answer as a flowchart: what it names and how those things relate">
+              flowchart
+            </Toggle>
+            <Toggle testid="toggle-graph" open={!!open.graph} onClick={() => flip("graph")}
+                    note="the answer as a 3D knowledge graph — things it names and how they relate">
+              knowledge graph
+            </Toggle>
           </>}
           {ex.artifacts.map((a) => (
             a.kind === "model" ? (
-              <button key={a.id}
-                className={`label hover:!text-paper ${modelOpen === a.id ? "!text-amber" : "!text-amber/80"}`}
-                onClick={() => setModelOpen(modelOpen === a.id ? null : a.id)}
-                data-note="an interactive 3D model — drag to orbit, scroll to zoom">
-                {modelOpen === a.id ? "▾" : "◈"} 3D model: {a.name}
-              </button>
+              <Toggle key={a.id} testid="artifact-model" open={modelOpen === a.id} accent
+                      onClick={() => setModelOpen(modelOpen === a.id ? null : a.id)}
+                      note="an interactive 3D model — drag to orbit, scroll to zoom">
+                3D model: {a.name}
+              </Toggle>
             ) : (
-              <a key={a.id} className="label hover:!text-paper !text-amber"
+              <a key={a.id} data-testid="artifact"
+                 className="label !text-signal hover:!no-underline flex items-center gap-2 group"
                  href={`${a.url}?query_id=${ex.queryId}`} target="_blank" rel="noreferrer"
                  data-note={isTask ? "the file the task produced — opens in the browser" : "compiled by the reporting agent from the verification matrix"}>
-                {isTask ? `${a.name} ↗` : "audit report ↗"}
+                <span className="w-[13px] h-[13px] rounded-full border border-signal grid place-items-center group-hover:bg-signal group-hover:text-ground transition-colors text-[8px] leading-none">↗</span>
+                {isTask ? a.name : "audit report"}
               </a>
             )
           ))}
         </div>
       )}
 
-      {logOpen && !running && <div className="mt-4 rule-t pt-3"><Activity ex={ex} full /></div>}
-      {gridOpen && !running && <div className="mt-4"><Grid ex={ex} showDraft={draft} /></div>}
-      {graphOpen && <div className="mt-4 rule-t pt-3"><Graph3D ex={ex} /></div>}
-      {flowOpen && <div className="mt-4 rule-t pt-3"><Flowchart ex={ex} /></div>}
+      {open.log && !running && <Panel><Activity ex={ex} full /></Panel>}
+      {open.matrix && !running && <Panel><Grid ex={ex} showDraft={draft} /></Panel>}
+      {open.graph && <Panel><Graph3D ex={ex} /></Panel>}
+      {open.flow && <Panel><Flowchart ex={ex} /></Panel>}
       {modelOpen && (() => {
         const a = ex.artifacts.find((x) => x.id === modelOpen);
-        return a ? <div className="mt-4"><ModelViewer url={`${a.url}?query_id=${ex.queryId}`} /></div> : null;
+        return a ? <Panel><ModelViewer url={`${a.url}?query_id=${ex.queryId}`} /></Panel> : null;
       })()}
 
       {ex.notes.length > 0 && (
-        <div className="mt-5 space-y-1">
+        <div data-testid="notes" className="mt-6 space-y-1">
           {ex.notes.map((n, i) => (
-            <div key={i} className="font-mono text-[10.5px] text-amber/80">
+            <div key={i} className="font-mono text-[11px] text-signal/85 break-words">
               {n.scope}: {n.message}
             </div>
           ))}
         </div>
       )}
     </article>
+  );
+}
+
+function Panel({ children }: { children: ReactNode }) {
+  return <div className="mt-6 pt-5 rule-t fade">{children}</div>;
+}
+
+/** A disclosure: a hairline plus that turns into a cross when open. */
+function Toggle({ open, onClick, children, testid, note, accent }: {
+  open: boolean; onClick: () => void; children: ReactNode; testid: string; note?: string; accent?: boolean;
+}) {
+  return (
+    <button
+      data-testid={testid}
+      data-note={note}
+      aria-expanded={open}
+      onClick={onClick}
+      className={`group flex items-center gap-2 label transition-colors ${
+        accent ? "!text-signal" : open ? "!text-ink" : "hover:!text-ink"
+      }`}
+    >
+      <svg width="9" height="9" viewBox="0 0 9 9" aria-hidden
+           className={`transition-transform duration-300 ${open ? "rotate-45" : ""}`}>
+        <path d="M4.5 0.5v8M0.5 4.5h8" stroke="currentColor" strokeWidth="1.1" />
+      </svg>
+      {children}
+    </button>
   );
 }

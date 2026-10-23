@@ -60,8 +60,8 @@ export function Workspaces() {
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <span className="label !text-slate/50 mr-0.5">corpus</span>
+      <div className="flex items-center gap-1 flex-wrap">
+        <span className="label !text-faint mr-2">corpus</span>
 
         <Pill
           label="Web"
@@ -81,32 +81,32 @@ export function Workspaces() {
         ))}
 
         {creating ? (
-          <form onSubmit={submitNew} className="flex items-center gap-1">
+          <form onSubmit={submitNew} className="flex items-center gap-1 ml-1">
             <input
               autoFocus
               value={title}
               placeholder="workspace name"
               onChange={(e) => setTitle(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Escape") { setCreating(false); setTitle(""); } }}
-              className="bg-transparent outline-none border-b border-amber text-paper font-mono text-[11px] py-0.5 w-36"
+              className="bg-transparent outline-none border-b border-signal text-ink font-mono text-[11px] py-0.5 w-36"
             />
-            <button type="submit" className="text-amber hover:opacity-80 px-0.5" data-note="create">✓</button>
+            <button type="submit" className="text-signal hover:opacity-70 px-1" data-note="create">✓</button>
             <button type="button" onClick={() => { setCreating(false); setTitle(""); }}
-                    className="text-slate hover:text-paper px-0.5" data-note="cancel">✕</button>
+                    className="text-faint hover:text-ink px-1" data-note="cancel">×</button>
           </form>
         ) : (
           <button
             onClick={() => setCreating(true)}
-            className="font-mono text-[11px] tracking-[0.06em] text-amber/80 hover:text-amber px-1.5 py-1 transition-colors"
+            className="font-mono text-[11px] text-mute hover:text-ink px-2 py-1 transition-colors"
             data-note="create a workspace to research your own documents"
           >
-            ＋ new
+            + new
           </button>
         )}
 
         {!workspaces.length && !creating && (
-          <span className="text-slate/45 text-[12.5px] italic ml-1">
-            — research your own documents: text, code, PDFs
+          <span className="text-faint text-[13px] italic ml-1 hidden sm:inline">
+            research your own documents: text, code, PDFs
           </span>
         )}
       </div>
@@ -117,29 +117,30 @@ export function Workspaces() {
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => { e.preventDefault(); setDragOver(false); void onFiles(e.dataTransfer.files); }}
-          className={`group flex items-center justify-between gap-3 px-3 py-2 border border-dashed cursor-pointer transition-colors ${
-            dragOver ? "border-amber bg-amber/10 text-paper" : "border-[var(--rule-2)] text-slate hover:border-amber/50 hover:text-paper"
+          className={`group flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 rounded-[3px] border border-dashed cursor-pointer transition-colors ${
+            dragOver ? "border-signal bg-[var(--sel)] text-ink" : "border-line-2 text-mute hover:border-ink/40 hover:text-ink"
           }`}
         >
           <input ref={fileRef} type="file" multiple hidden accept={ACCEPT}
                  onChange={(e) => void onFiles(e.target.files)} />
-          <span className="font-mono text-[10.5px] tracking-[0.04em] flex items-center gap-2">
-            <span className={ingesting ? "live-dot text-amber" : "text-amber/70 group-hover:text-amber"}>⤓</span>
-            {ingesting ? "ingesting…" : dragOver ? "release to ingest" : `drop files into “${active.title}” or click`}
-            {!ingesting && !dragOver && <span className="text-slate/40">· text · markdown · code · pdf</span>}
+          <span className="font-mono text-[10.5px] flex items-center gap-2 min-w-0">
+            <span className={`w-1.5 h-1.5 rounded-full bg-signal ${ingesting ? "live-dot" : ""}`} />
+            <span className="truncate">
+              {ingesting ? "ingesting…" : dragOver ? "release to ingest" : `drop files into “${active.title}” or click`}
+            </span>
           </span>
           <span className="flex items-center gap-3 shrink-0">
-            {note && <span className="font-mono text-[10px] text-slate/70 normal-case">{note}</span>}
-            <span className="font-mono text-[10px] text-slate/60">
+            {note && <span className="font-mono text-[10px] text-mute">{note}</span>}
+            <span className="font-mono text-[10px] text-faint">
               {active.n_documents ?? 0} docs · {active.n_chunks ?? 0} chunks
             </span>
             <button
               type="button"
               onClick={(e) => { e.preventDefault(); void removeActive(); }}
-              className="font-mono text-[11px] text-slate/50 hover:text-amber transition-colors"
+              className="font-mono text-[12px] text-faint hover:text-signal transition-colors"
               data-note="delete this workspace and its documents"
             >
-              ✕
+              ×
             </button>
           </span>
         </label>
@@ -155,14 +156,13 @@ function Pill({ label, count, active, onClick, note }: {
     <button
       onClick={onClick}
       data-note={note}
-      className={`font-mono text-[11px] tracking-[0.04em] px-2.5 py-1 border transition-colors ${
-        active
-          ? "border-amber text-amber bg-amber/10"
-          : "border-[var(--rule)] text-slate hover:text-paper hover:border-[var(--rule-2)]"
+      className={`flex items-center gap-1.5 font-mono text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+        active ? "border-ink text-ink" : "border-transparent text-mute hover:text-ink"
       }`}
     >
+      <span className={`w-1.5 h-1.5 rounded-full ${active ? "bg-signal" : "border border-faint"}`} />
       {label}
-      {count != null && <span className="opacity-45 ml-1.5">{count}</span>}
+      {count != null && <span className="text-faint">{count}</span>}
     </button>
   );
 }
