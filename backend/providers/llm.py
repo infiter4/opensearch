@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator
 
-from . import ollama, openai_compat
+from . import cache, ollama, openai_compat
 from .runcfg import (  # noqa: F401 — re-exported
     effective_models, key_for, model_for, report, set_reporter, set_run_overrides,
 )
@@ -23,6 +23,20 @@ def chat(model: str, messages: list[dict], **kw) -> AsyncIterator[dict[str, Any]
     if openai_compat.is_compat(model):
         return openai_compat.chat(model, messages, **kw)
     return ollama.chat(model, messages, **kw)
+
+
+async def embeddings(model: str, texts: list[str]) -> list[list[float]]:
+    """Embed a batch of strings -> one vector each. Routed by model id like chat(); cached at the
+    facade so an identical batch is a free hit (and replays offline). Empty input short-circuits."""
+    if not texts:
+        return []
+
+    async def _call() -> list[list[float]]:
+        if openai_compat.is_compat(model):
+            return await openai_compat.embeddings(model, texts)
+        return await ollama.embeddings(model, texts)
+
+    return await cache.cached_call("embed", {"model": model, "input": texts}, _call)
 
 
 async def complete(model: str, messages: list[dict], **kw) -> str:

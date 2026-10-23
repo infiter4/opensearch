@@ -262,6 +262,28 @@ async def _chat_stream(model, messages, tools, num_ctx, temperature, timeout):
     }
 
 
+async def embeddings(model: str, texts: list[str], timeout: float = 120.0) -> list[list[float]]:
+    """Embed a batch via /api/embed. Bare model -> local daemon, `:cloud` -> ollama.com (same
+    routing as chat). Non-streaming: one POST is one read, so the stall timeout is ample.
+
+    Caching lives in the llm facade; this is the raw transport. Shares the process-wide inflight
+    gate so a burst of ingest embeddings can't crowd out live chat calls to the same daemon.
+    """
+    base, headers = _endpoint(model)
+    payload = {"model": model, "input": texts}
+    await _await_cooldown()
+    async with _INFLIGHT:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
+            resp = await client.post(f"{base}/api/embed", json=payload, headers=headers)
+            if resp.status_code != 200:
+                raise LLMError(f"{model}: HTTP {resp.status_code}: {resp.text[:300]}")
+            data = resp.json()
+    embs = data.get("embeddings")
+    if not embs or len(embs) != len(texts):
+        raise LLMError(f"{model}: embed returned {len(embs or [])} vectors for {len(texts)} inputs")
+    return embs
+
+
 async def complete(model: str, messages: list[dict], **kw) -> str:
     """Non-streaming convenience for the JSON stages (planner/claims/verify/rewrite)."""
     out = ""

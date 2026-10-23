@@ -22,9 +22,10 @@ class Turn(BaseModel):
 
 class ResearchIn(BaseModel):
     question: str = Field(min_length=3, max_length=800)
-    mode: str = "pro"
+    mode: str = "pro"          # lite|pro|deep, or "auto" to let the router pick
     keys: dict[str, str] = Field(default_factory=dict)
     models: dict[str, str] = Field(default_factory=dict)
+    workspace: str | None = None   # workspace slug -> research the ingested corpus, not the web
     # Prior turns in this thread. Only the planner sees them — enough to resolve a follow-up,
     # and nowhere near the verifier, whose independence depends on seeing nothing but the claim
     # and the source text.
@@ -33,9 +34,9 @@ class ResearchIn(BaseModel):
 
 @router.post("/research")
 async def start(body: ResearchIn) -> dict:
-    if body.mode not in config.PRESETS:
+    if body.mode != "auto" and body.mode not in config.PRESETS:
         raise HTTPException(400, f"unknown mode {body.mode!r}")
-    s = sessions.create(body.question, body.mode, body.keys, body.models)
+    s = sessions.create(body.question, body.mode, body.keys, body.models, workspace=body.workspace)
     s.history = [t.model_dump() for t in body.history]
     return {"query_id": s.query_id}
 
@@ -45,7 +46,7 @@ async def _drive(s: sessions.Session) -> None:
     try:
         async for event, data in orchestrator.run(
             s.question, s.mode, cancel=s.cancel, query_id=s.query_id,
-            models=s.models, keys=s.keys, history=s.history,
+            models=s.models, keys=s.keys, history=s.history, workspace=s.workspace,
             on_registry=lambda r: setattr(s, "registry", r),
         ):
             if event == "source":
@@ -168,8 +169,13 @@ async def artifact(artifact_id: str, query_id: str) -> FileResponse:
     if not art or not art.get("path"):
         raise HTTPException(404, "unknown artifact")
     p = Path(art["path"]).resolve()
-    # Only serve what the reporter actually published into this run's workspace.
+    # Only serve what an agent actually published into this run's workspace.
     ws = (Path(config.DATA_DIR) / "artifacts" / query_id).resolve()
     if not str(p).startswith(str(ws) + "/") or not p.exists():
         raise HTTPException(404, "artifact not on disk")
-    return FileResponse(p, media_type="text/html")
+    media = {
+        ".html": "text/html", ".glb": "model/gltf-binary", ".gltf": "model/gltf+json",
+        ".stl": "model/stl", ".obj": "text/plain", ".scad": "text/plain",
+        ".csv": "text/csv", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml",
+    }.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(p, media_type=media)

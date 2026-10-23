@@ -12,7 +12,9 @@ from typing import AsyncIterator, Callable
 
 from .. import config
 from ..providers import llm
-from . import heatmap, lead as lead_mod, planner, report as report_mod, rewrite, subagent
+from ..store import db as store_db
+from ..store import workspaces as ws_store
+from . import doer, heatmap, lead as lead_mod, planner, report as report_mod, rewrite, router, subagent
 from .sources import SourceRegistry
 
 
@@ -20,7 +22,7 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
               query_id: str | None = None, models: dict[str, str] | None = None,
               keys: dict[str, str] | None = None,
               on_registry: Callable[[SourceRegistry], None] | None = None,
-              history: list[dict] | None = None,
+              history: list[dict] | None = None, workspace: str | None = None,
               ) -> AsyncIterator[tuple[str, dict]]:
     """`query_id` MUST be the caller's session id when there is one. The frontend reads it out of
     the `meta` event and hangs every later lookup off it — /api/source/{id}?query_id=… resolves
@@ -32,7 +34,6 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
     that may never open one is waste. But the drawer needs the real page text to locate the quote
     in, so the server has to keep it: this is the seam that lets a session serve it on demand.
     """
-    preset = config.PRESETS.get(mode, config.PRESETS["pro"])
     cancel = cancel or asyncio.Event()
     reg = SourceRegistry()
     if on_registry:
@@ -55,15 +56,42 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
     # nothing at all.
     llm.set_reporter(lambda scope, message: emit("provider", {"scope": scope, "message": message}))
 
+    # Optional corpus: when a workspace is bound (and the store is enabled) the sub-agents research
+    # the ingested documents instead of the web. A missing/unknown workspace degrades to the web.
+    ws_row = None
+    if workspace and store_db.is_enabled():
+        try:
+            ws_row = await ws_store.get_by_slug(workspace)
+        except Exception as e:
+            emit("provider", {"scope": "store", "message": store_db.scrub(f"workspace lookup failed: {e}")})
+        if ws_row is None:
+            emit("error", {"scope": "workspace",
+                           "message": f"workspace {workspace!r} not found — researching the web instead"})
+
+    # Intent + auto-selected depth. Corpus availability nudges the depth up (retrieval pays off).
+    route = await router.classify(question, history=history, corpus_available=ws_row is not None)
+    if mode == "auto":
+        mode = route.get("mode", "pro")
+    preset = config.PRESETS.get(mode, config.PRESETS["pro"])
+
     yield "meta", {
         "query_id": query_id, "mode": config.RESEARCH_MODE, "search_mode": mode,
-        "models": llm.effective_models(),
+        "models": llm.effective_models(), "workspace": (ws_row["slug"] if ws_row else None),
         "preset": {
-            "n_agents": preset.n_agents, "lanes": list(preset.lanes),
+            "n_agents": preset.n_agents, "lanes": (["corpus"] if ws_row else list(preset.lanes)),
             "max_sources": preset.max_sources, "rewrite_iters": preset.rewrite_iters,
             "red_team": preset.red_team,
         },
     }
+    yield "route", route
+
+    async def do_task() -> dict:
+        text = await doer.run_task(question, query_id, emit, cancel, history=history)
+        emit("answer_done", {
+            "text": text, "sentences": [], "gaps": [], "conflicts": [],
+            "elapsed_s": round(time.time() - t0, 1),
+        })
+        return {"text": text}
 
     async def pipeline() -> dict:
         subtasks = await planner.plan(
@@ -78,7 +106,7 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
         async def one(st: dict) -> dict:
             async with sem:
                 return await subagent.run_subagent(
-                    st, reg, preset, planner.lanes_for(st, preset), emit, cancel
+                    st, reg, preset, planner.lanes_for(st, preset), emit, cancel, workspace=ws_row
                 )
 
         reports = list(await asyncio.gather(*(one(st) for st in subtasks), return_exceptions=True))
@@ -179,28 +207,57 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
             )
         return ld
 
-    task = asyncio.create_task(pipeline())
+    task = asyncio.create_task(do_task() if route["kind"] == "task" else pipeline())
+
+    # A hard wall-clock ceiling so a run can NEVER hang forever. Provider stalls, a serialized
+    # rewriter queue, or a question the corpus can't answer (endless failing-claim churn) could
+    # otherwise leave the tab spinning for 15+ minutes. On the deadline we cancel, flush what's
+    # queued, and finalize with a clear message — partial results stay on screen.
+    budget = {"lite": 240.0, "pro": 480.0, "deep": 900.0}.get(mode, 480.0)
+    deadline = t0 + budget
+
     # The finally is load-bearing, not hygiene. When the browser goes away — a reload, a closed
     # tab, a stop — FastAPI closes this async generator, GeneratorExit is raised at the yield, and
     # the loop below simply stops. Without cancelling `task`, the pipeline runs on forever with
-    # nobody reading it: four agents and hundreds of verify calls, each holding a slot in the
-    # module-GLOBAL verify semaphore (six of them, total, for the whole process). A few reloads
-    # leak every slot, and from then on every new run hangs the moment it reaches verification —
-    # always at the same place, because that is where the first `async with _SEM` waits forever.
-    # An orphaned run also keeps spending the rate limit it is no longer allowed to use.
+    # nobody reading it, leaking module-global semaphore slots and spending rate limit it no
+    # longer owns.
     try:
+        timed_out = False
         while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                timed_out = True
+                break
             drain = asyncio.create_task(q.get())
-            done, _ = await asyncio.wait({drain, task}, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                {drain, task}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+            )
             if drain in done:
                 yield drain.result()
                 continue
             drain.cancel()
-            while not q.empty():          # flush anything queued as the pipeline finished
-                yield q.get_nowait()
+            if task in done:                  # pipeline finished
+                while not q.empty():          # flush anything queued as it wrapped up
+                    yield q.get_nowait()
+                break
+            timed_out = True                  # nothing completed in the window -> deadline hit
             break
 
-        if task.exception():
+        if timed_out:
+            cancel.set()
+            if not task.done():
+                task.cancel()
+                try:
+                    await task                # propagates into the gathers, freeing _SEM
+                except (asyncio.CancelledError, Exception):
+                    pass
+            while not q.empty():
+                yield q.get_nowait()
+            yield "error", {"scope": "run", "message": (
+                f"this run passed its {int(budget // 60)}-minute limit and was stopped — showing "
+                "what completed. Try a narrower question, or Lite mode."
+            )}
+        elif task.exception():
             e = task.exception()
             yield "error", {"scope": "run", "message": f"{type(e).__name__}: {e}"}
         yield "done", {"elapsed_s": round(time.time() - t0, 1)}

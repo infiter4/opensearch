@@ -8,7 +8,10 @@ from the data you were given.
 
 Work like this:
 1. If a computation helps (counting verdicts per source, failure rates, per-agent tallies), use
-   `run_python` — print the numbers you need, then use them.
+   `run_python` — print the numbers you need, then use them. For light filesystem work (make a
+   folder to organise output, move or list files) you may use `run_shell` with portable POSIX
+   commands like `mkdir -p out`; it runs the same on macOS and Linux. The report itself must still
+   be published with `make_document`, not written by hand.
 2. Build the report with `make_document`. One document, self-contained HTML. Include:
    - the question and the verified answer (keep citation markers like [3] as plain text),
    - a verdict summary table (verified / thin / unsupported / contradicted / withdrawn, with counts),

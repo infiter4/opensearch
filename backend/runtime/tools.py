@@ -36,6 +36,10 @@ class Ctx:
     max_sources: int = 6
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     workspace: str | None = None  # per-run artifact sandbox (report tools only)
+    # Corpus binding (set when a run researches an ingested workspace instead of the web).
+    workspace_id: str | None = None
+    ws_slug: str | None = None
+    embed_model: str | None = None
 
 
 @dataclass

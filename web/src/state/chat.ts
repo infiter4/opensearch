@@ -17,6 +17,10 @@ export interface Exchange {
   question: string;
   mode: string;              // lite | pro | deep
   cacheMode: string;         // live | auto | replay
+  kind?: "research" | "task";  // intent-router verdict: research question vs do-this task (CUA)
+  routeTitle?: string;         // short label of what the router thought this was
+  workspace?: string | null;   // corpus this run researched (slug), or null for the web
+  resolvedMode?: string;       // the depth auto-mode actually picked (from meta.search_mode)
   phase: RunPhase;
   startedAt: number;
   elapsed: number;
@@ -60,12 +64,23 @@ export interface Thread {
   exchanges: Exchange[];
 }
 
+export interface WorkspaceInfo {
+  slug: string; title: string;
+  n_documents?: number; n_chunks?: number; embed_model?: string; embed_dim?: number;
+}
+
 interface ChatState {
   threads: Thread[];
   activeId: string;
   showDraft: Record<string, boolean>;   // per-exchange first-draft toggle
   openSource: { exKey: string; id: number; quote?: string | null } | null;
   focusSentence: string | null;
+
+  // Corpus workspaces (backend feature-flagged on SUPABASE_DB_URL). activeWorkspace === null means
+  // research the open web, exactly as before.
+  workspaces: WorkspaceInfo[];
+  activeWorkspace: string | null;
+  storeEnabled: boolean;
 
   ask(question: string, mode: string): Promise<void>;
   listen(exKey: string, queryId: string): void;
@@ -80,6 +95,12 @@ interface ChatState {
   newThread(): void;
   openThread(id: string): void;
   deleteThread(id: string): void;
+
+  loadWorkspaces(): Promise<void>;
+  createWorkspace(title: string): Promise<string | null>;
+  setActiveWorkspace(slug: string | null): void;
+  deleteWorkspace(slug: string): Promise<void>;
+  ingestFiles(files: File[]): Promise<{ documents: number; chunks: number; skipped: number } | null>;
 }
 
 /** The active thread's exchanges. Components read this instead of a flat list.
@@ -281,7 +302,7 @@ const short = (u: string) => u.replace(/^https?:\/\/(www\.)?/, "").slice(0, 46);
 function freshExchange(question: string, mode: string): Exchange {
   return {
     key: `x${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-    queryId: null, question, mode, cacheMode: "auto", phase: "researching",
+    queryId: null, question, mode, cacheMode: "auto", kind: "research", phase: "researching",
     startedAt: Date.now(), elapsed: 0,
     researchers: {}, order: [], sources: {},
     checks: {}, draft: {}, repairing: new Set(), healed: new Set(),
@@ -301,6 +322,9 @@ export const useChat = create<ChatState>((set, get) => ({
   showDraft: {},
   openSource: null,
   focusSentence: null,
+  workspaces: [],
+  activeWorkspace: null,
+  storeEnabled: false,
 
   newThread: () => set({ activeId: "", openSource: null, focusSentence: null }),
   openThread: (id) => set({ activeId: id, openSource: null, focusSentence: null }),
@@ -310,6 +334,52 @@ export const useChat = create<ChatState>((set, get) => ({
       saveThreads(threads);
       return { threads, activeId: s.activeId === id ? (threads[0]?.id ?? "") : s.activeId };
     }),
+
+  async loadWorkspaces() {
+    try {
+      const res = await fetch("/api/workspaces");
+      if (!res.ok) { set({ storeEnabled: false }); return; }   // 503 => feature off
+      const { workspaces } = await res.json();
+      set({ storeEnabled: true, workspaces: workspaces ?? [] });
+    } catch { set({ storeEnabled: false }); }
+  },
+
+  async createWorkspace(title) {
+    try {
+      const res = await fetch("/api/workspaces", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      if (!res.ok) return null;
+      const { workspace } = await res.json();
+      set((s) => ({ workspaces: [workspace, ...s.workspaces], activeWorkspace: workspace.slug }));
+      return workspace.slug as string;
+    } catch { return null; }
+  },
+
+  setActiveWorkspace(slug) { set({ activeWorkspace: slug }); },
+
+  async deleteWorkspace(slug) {
+    try { await fetch(`/api/workspaces/${slug}`, { method: "DELETE" }); } catch { /* ignore */ }
+    set((s) => ({
+      workspaces: s.workspaces.filter((w) => w.slug !== slug),
+      activeWorkspace: s.activeWorkspace === slug ? null : s.activeWorkspace,
+    }));
+  },
+
+  async ingestFiles(files) {
+    const slug = get().activeWorkspace;
+    if (!slug || !files.length) return null;
+    const form = new FormData();
+    for (const f of files) form.append("files", f, f.name);
+    try {
+      const res = await fetch(`/api/workspaces/${slug}/ingest`, { method: "POST", body: form });
+      if (!res.ok) return null;
+      const summary = await res.json();
+      await get().loadWorkspaces();   // refresh doc/chunk counts
+      return summary;
+    } catch { return null; }
+  },
 
   async ask(question, mode) {
     const ex = freshExchange(question, mode);
@@ -344,11 +414,13 @@ export const useChat = create<ChatState>((set, get) => ({
       .slice(-3)
       .map((e) => ({ question: e.question, answer: e.answer.text.slice(0, 1500) }));
 
+    const workspace = get().activeWorkspace;
+    if (workspace) patch(set, ex.key, () => ({ workspace }));
     try {
       const res = await fetch("/api/research", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, mode, history }),
+        body: JSON.stringify({ question, mode, history, workspace }),
       });
       if (!res.ok) throw new Error(`start failed: HTTP ${res.status}`);
       const { query_id } = await res.json();
@@ -382,7 +454,7 @@ export const useChat = create<ChatState>((set, get) => ({
           if (event === "done" || (event === "error" && d?.scope === "run")) es.close();
         });
       [
-        "meta", "plan", "agent_status", "agent_tool", "source", "agent_token", "agent_answer",
+        "meta", "route", "plan", "agent_status", "agent_tool", "source", "agent_token", "agent_answer",
         "claims", "verdict", "rewrite_start", "rewrite_done", "agent_report", "lead_token",
         "heatmap", "trust", "contradiction", "answer_done", "graph", "artifact", "provider",
         "error", "done",
@@ -440,9 +512,31 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   apply(exKey, event, d) {
+    // A structural event (verdict, agent_answer, answer_done, done…) must see the streamed text
+    // already applied, so drain the token buffer for this exchange first.
+    if (event !== "agent_token" && event !== "lead_token") flushTokensFor(exKey);
     switch (event) {
       case "meta":
-        return patch(set, exKey, () => ({ cacheMode: d.mode }));
+        return patch(set, exKey, () => ({
+          cacheMode: d.mode,
+          resolvedMode: d.search_mode,          // what auto-mode actually picked
+          workspace: d.workspace ?? null,
+        }));
+
+      case "route":
+        return patch(set, exKey, (ex) => ({
+          kind: d.kind === "task" ? "task" : "research",
+          routeTitle: d.title,
+          // A task run does no research and no fact-checking; a plain draft phase reads right.
+          phase: d.kind === "task" ? ("writing" as RunPhase) : ex.phase,
+          log: note(
+            ex,
+            d.kind === "task" ? "report" : "plan",
+            d.kind === "task" ? `task detected — ${d.title ?? "doing it"}` : "research question",
+            undefined,
+            d.reason,
+          ),
+        }));
 
       case "plan":
         return patch(set, exKey, (ex) => {
@@ -499,10 +593,7 @@ export const useChat = create<ChatState>((set, get) => ({
         }));
 
       case "agent_token":
-        return patch(set, exKey, (ex) => {
-          const r = ex.researchers[d.agent_id] ?? blankResearcher(d.agent_id);
-          return { researchers: { ...ex.researchers, [d.agent_id]: { ...r, text: r.text + d.text } } };
-        });
+        return bufferToken(exKey, d.agent_id, d.text);
 
       case "agent_answer":
         // Authoritative text — sentence offsets index into THIS string, never the token stream.
@@ -539,15 +630,7 @@ export const useChat = create<ChatState>((set, get) => ({
         }));
 
       case "lead_token":
-        return patch(set, exKey, (ex) => ({
-          phase: "writing" as RunPhase,
-          answer: { ...ex.answer, text: ex.answer.text + d.text },
-          // Once, on the first token — the merge is a stage, not a token stream.
-          log: ex.answer.text
-            ? ex.log
-            : note(ex, "merge", `merging findings into one answer`, "lead",
-                   "cannot see source text — cites only what was read"),
-        }));
+        return bufferToken(exKey, null, d.text);
 
       case "verdict":
         return patch(set, exKey, (ex) => {
@@ -705,6 +788,60 @@ export const useChat = create<ChatState>((set, get) => ({
  *  Keyed on exKey across ALL threads, never on the active one: a run keeps streaming after you
  *  switch away, and writing its verdicts into whichever thread happens to be open would corrupt
  *  a finished answer with another question's marks. */
+// ——— token coalescing ———————————————————————————————————————————————
+// agent_token / lead_token arrive per token — tens of thousands over a long run. Patching the whole
+// thread tree on every one pegged the main thread until Safari killed the tab. Buffer the appends
+// and flush at ~12 Hz: identical text on screen, a fraction of the renders. Any structural event
+// flushes first (see apply), so ordering is preserved.
+type TokBuf = { agent: Record<string, string>; lead: string };
+const tokenBuf = new Map<string, TokBuf>();
+let tokenTimer: ReturnType<typeof setTimeout> | null = null;
+
+function bufferToken(exKey: string, agent: string | null, text: string) {
+  let b = tokenBuf.get(exKey);
+  if (!b) { b = { agent: {}, lead: "" }; tokenBuf.set(exKey, b); }
+  if (agent) b.agent[agent] = (b.agent[agent] ?? "") + text;
+  else b.lead += text;
+  if (tokenTimer == null) tokenTimer = setTimeout(flushTokens, 80);
+}
+
+function flushOne(exKey: string, b: TokBuf) {
+  patch(useChat.setState, exKey, (ex) => {
+    const out: Partial<Exchange> = {};
+    const aids = Object.keys(b.agent);
+    if (aids.length) {
+      const researchers = { ...ex.researchers };
+      for (const aid of aids) {
+        const r = researchers[aid] ?? blankResearcher(aid);
+        researchers[aid] = { ...r, text: r.text + b.agent[aid] };
+      }
+      out.researchers = researchers;
+    }
+    if (b.lead) {
+      out.answer = { ...ex.answer, text: ex.answer.text + b.lead };
+      out.phase = "writing" as RunPhase;
+      if (!ex.answer.text) {
+        out.log = note(ex, "merge", "merging findings into one answer", "lead",
+                       "cannot see source text — cites only what was read");
+      }
+    }
+    return out;
+  });
+}
+
+function flushTokens() {
+  tokenTimer = null;
+  for (const [exKey, b] of tokenBuf) flushOne(exKey, b);
+  tokenBuf.clear();
+}
+
+function flushTokensFor(exKey: string) {
+  const b = tokenBuf.get(exKey);
+  if (!b) return;
+  tokenBuf.delete(exKey);
+  flushOne(exKey, b);
+}
+
 function patch(
   set: (fn: (s: ChatState) => Partial<ChatState>) => void,
   exKey: string,

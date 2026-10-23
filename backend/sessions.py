@@ -22,6 +22,9 @@ class Session:
     mode: str
     keys: dict[str, str] = field(default_factory=dict)
     models: dict[str, str] = field(default_factory=dict)
+    # Optional workspace slug: when set (and the store is enabled), the run researches the ingested
+    # corpus instead of the open web.
+    workspace: str | None = None
     created: float = field(default_factory=time.time)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     sources: dict[int, dict] = field(default_factory=dict)
@@ -68,11 +71,12 @@ class Session:
 _SESSIONS: dict[str, Session] = {}
 
 
-def create(question: str, mode: str, keys: dict | None = None, models: dict | None = None) -> Session:
+def create(question: str, mode: str, keys: dict | None = None, models: dict | None = None,
+           workspace: str | None = None) -> Session:
     _gc()
     qid = uuid.uuid4().hex[:12]
     s = Session(query_id=qid, question=question, mode=mode,
-                keys=keys or {}, models=models or {})
+                keys=keys or {}, models=models or {}, workspace=workspace)
     _SESSIONS[qid] = s
     return s
 

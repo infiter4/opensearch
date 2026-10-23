@@ -32,6 +32,18 @@ OLLAMA_LOCAL_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 Mode = Literal["live", "auto", "replay"]
 RESEARCH_MODE: Mode = os.environ.get("RESEARCH_MODE", "auto")  # type: ignore[assignment]
 
+# ── Graph-RAG / workspaces (all OPTIONAL; absent SUPABASE_DB_URL => feature disabled) ──
+# The DSN is a server secret: .env only, never posted from the browser, never passed to cache.py.
+# The pooler URL is used at runtime; the DIRECT url (port 5432) is preferred for migrations and
+# `create extension` (the session pooler can reject DDL / breaks prepared statements).
+SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL") or None
+SUPABASE_DB_DIRECT_URL = os.environ.get("SUPABASE_DB_DIRECT_URL") or None
+# Embedding model + dimension. `embeddinggemma` runs on the LOCAL ollama daemon (bare name -> the
+# daemon, per ollama._endpoint) at 768 dims — Ollama Cloud gates /api/embed on the free tier, and
+# local means the corpus embeds offline. The dim is a ONE-WAY DOOR: it is baked into the pgvector
+# column and validated per-workspace, so changing the model means re-embedding every chunk.
+EMBED_DIM = int(os.environ.get("EMBED_DIM", "768"))
+
 # Stage -> model. Three distinct families across write / verify / repair is the whole point: the
 # verifier must not share a lineage with the writer, or "independent check" is a lie. All tags
 # verified HTTP 200.
@@ -50,12 +62,18 @@ RESEARCH_MODE: Mode = os.environ.get("RESEARCH_MODE", "auto")  # type: ignore[as
 # minimax is NOT eligible to verify at any speed: it writes.
 MODELS: dict[str, str] = {
     "planner": os.environ.get("PLANNER_MODEL", "kimi-k2.6:cloud"),
-    "subagent": os.environ.get("SUBAGENT_MODEL", "minimax-m3:cloud"),
+    "subagent": os.environ.get("SUBAGENT_MODEL", "mistral-large-3:675b:cloud"),
     "claims": os.environ.get("CLAIMS_MODEL", "kimi-k2.6:cloud"),
     "verifier": os.environ.get("VERIFIER_MODEL", "kimi-k2.6:cloud"),
     "rewriter": os.environ.get("REWRITER_MODEL", "qwen3.5:397b:cloud"),
-    "lead": os.environ.get("LEAD_MODEL", "minimax-m3:cloud"),
+    "lead": os.environ.get("LEAD_MODEL", "mistral-large-3:675b:cloud"),
     "reporter": os.environ.get("REPORTER_MODEL", "kimi-k2.7-code:cloud"),
+    # Intent router: one cheap JSON call, only for inputs the keyword fast-path can't resolve.
+    "router": os.environ.get("ROUTER_MODEL", "kimi-k2.6:cloud"),
+    # The "do-it" agent for CUA tasks — needs strong tool-use, so the code-tuned tag.
+    "doer": os.environ.get("DOER_MODEL", "kimi-k2.7-code:cloud"),
+    # Embedder for the workspace corpus. Bare name -> local ollama daemon (offline, free, 768-dim).
+    "embed": os.environ.get("EMBED_MODEL", "embeddinggemma"),
 }
 
 # Fallback when the verifier sustains 429/5xx. Slow, but a slow verdict beats no verdict — and it

@@ -7,6 +7,7 @@ wrong afterwards, and a wrong offset binds a citation chip to the wrong sentence
 from __future__ import annotations
 
 from .. import config
+from ..runtime import corpus_tools  # noqa: F401 — import registers corpus_search/corpus_read
 from ..runtime import research_tools  # noqa: F401 — import registers the tools
 from ..runtime.loop import run_agent
 from ..runtime.registry import spec
@@ -26,6 +27,13 @@ Report only what you can actually source and cite. If you look and the consensus
 say exactly that — a clean bill of health is a real finding. Do not manufacture doubt.
 """
 
+_CORPUS_EXTRA = """
+You are researching the PROJECT'S OWN ingested documents, not the open web. Use `corpus_search` to
+find relevant passages and `corpus_read` to read one before you cite it. Cite only passages you have
+actually read, with [n] at the end of the sentence. If the documents do not answer part of the
+question, say so plainly — do not fill the gap from outside knowledge.
+"""
+
 
 async def run_subagent(
     subtask: dict,
@@ -34,22 +42,40 @@ async def run_subagent(
     lanes: tuple[str, ...],
     emit,
     cancel,
+    workspace: dict | None = None,
 ) -> dict:
-    """Returns {agent_id, role, title, text, sentences, claims, verdicts, orphans, failed}."""
+    """Returns {agent_id, role, title, text, sentences, claims, verdicts, orphans, failed}.
+
+    When `workspace` is set the agent searches the ingested corpus (corpus_search/corpus_read)
+    instead of the web; everything after the draft is identical because corpus_read interns into
+    the same SourceRegistry."""
     aid = subtask["agent_id"]
     emit("agent_status", {"agent_id": aid, "status": "spawned", "detail": subtask["title"]})
 
-    s = spec("subagent", tools=("web_search", "read_page"), max_steps=preset.max_steps)
-    ctx = Ctx(
-        agent=aid, emit=emit, registry=reg,
-        lanes=lanes, max_sources=preset.max_sources, cancel=cancel,
-    )
+    if workspace:
+        tools = ("corpus_search", "corpus_read")
+        ctx = Ctx(
+            agent=aid, emit=emit, registry=reg, max_sources=preset.max_sources, cancel=cancel,
+            workspace_id=workspace["id"], ws_slug=workspace["slug"],
+            embed_model=workspace["embed_model"],
+        )
+        source_word = "the project's documents"
+    else:
+        tools = ("web_search", "read_page")
+        ctx = Ctx(
+            agent=aid, emit=emit, registry=reg,
+            lanes=lanes, max_sources=preset.max_sources, cancel=cancel,
+        )
+        source_word = "sources"
 
+    s = spec("subagent", tools=tools, max_steps=preset.max_steps)
     prompt = (
         f"Research this and report what is true:\n\n{subtask['subquery']}\n\n"
-        f"You have {preset.max_steps} actions. Search, read the pages that matter, then write."
+        f"You have {preset.max_steps} actions. Search {source_word}, read what matters, then write."
     )
-    extra = _RED_TEAM_EXTRA if subtask.get("role") == "red_team" else ""
+    extra = _CORPUS_EXTRA if workspace else ""
+    if subtask.get("role") == "red_team":
+        extra = _RED_TEAM_EXTRA
 
     emit("agent_status", {"agent_id": aid, "status": "drafting"})
     try:

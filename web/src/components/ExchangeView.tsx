@@ -6,6 +6,7 @@ import { Activity } from "./Activity";
 import { Flowchart } from "./Flowchart";
 import { Graph3D } from "./Graph3D";
 import { Grid } from "./Grid";
+import { ModelViewer } from "./ModelViewer";
 import { Progress } from "./Progress";
 import { Summary } from "./Summary";
 
@@ -15,8 +16,10 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
   const [graphOpen, setGraphOpen] = useState(false);
   const [flowOpen, setFlowOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState<string | null>(null);
   const draft = !!showDraft[ex.key];
   const running = ex.phase !== "done" && ex.phase !== "error" && ex.phase !== "interrupted";
+  const isTask = ex.kind === "task";   // routed to the doer: no research, no fact-checking chrome
   const checks = draft ? ex.draft : ex.checks;
 
   const bySentence = useMemo(() => {
@@ -65,8 +68,11 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
   return (
     <article className="pt-8 pb-10 rule-b last:border-b-0">
       <div className="label flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span>{ex.mode}</span>
-        {nSources > 0 && <><span className="text-slate/40">·</span><span>{nSources} sources</span></>}
+        <span className={isTask ? "text-amber" : ""}>{isTask ? "task" : (ex.resolvedMode || ex.mode)}</span>
+        {ex.workspace && <><span className="text-slate/40">·</span>
+          <span className="text-amber" data-note="researched your ingested documents, not the web">corpus: {ex.workspace}</span></>}
+        {isTask && ex.routeTitle && <><span className="text-slate/40">·</span><span>{ex.routeTitle}</span></>}
+        {nSources > 0 && <><span className="text-slate/40">·</span><span>{nSources} {ex.workspace ? "passages" : "sources"}</span></>}
         {!running && ex.elapsed > 0 && <><span className="text-slate/40">·</span><span>{Math.round(ex.elapsed)}s</span></>}
         {ex.cacheMode === "replay" && <><span className="text-slate/40">·</span><span className="text-amber">replay</span></>}
         <span className="flex-1" />
@@ -120,7 +126,7 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
       {running && (
         <div className="mt-5 grid gap-6" style={{ gridTemplateColumns: "minmax(0,1fr) 210px" }}>
           <Activity ex={ex} />
-          <div className="pt-1"><Progress ex={ex} /></div>
+          <div className="pt-1">{!isTask && <Progress ex={ex} />}</div>
         </div>
       )}
 
@@ -135,7 +141,7 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
               onFocus={(sid) => focus(focusSentence === sid ? null : sid)}
             />
           </div>
-          <div className="pt-1">{!running && <Summary ex={ex} draft={draft} />}</div>
+          <div className="pt-1">{!running && !isTask && <Summary ex={ex} draft={draft} />}</div>
         </div>
       )}
 
@@ -164,6 +170,8 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
                   data-note="every step this run took, with timings">
             {logOpen ? "▾" : "▸"} activity log ({ex.log?.length ?? 0})
           </button>
+          {/* Research-only views: a task run has no researchers, sources, or checks to draw. */}
+          {!isTask && <>
           {/* The flowchart is drawn from data this exchange already holds, so it is available for
               every conversation in every mode — it never needed the backend's graph. */}
           <button className={`label hover:!text-paper ${flowOpen ? "!text-paper" : ""}`}
@@ -180,12 +188,22 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
           >
             {graphOpen ? "▾" : "▸"} knowledge graph
           </button>
+          </>}
           {ex.artifacts.map((a) => (
-            <a key={a.id} className="label hover:!text-paper !text-amber"
-               href={`${a.url}?query_id=${ex.queryId}`} target="_blank" rel="noreferrer"
-               data-note="compiled by the reporting agent from the verification matrix">
-              audit report ↗
-            </a>
+            a.kind === "model" ? (
+              <button key={a.id}
+                className={`label hover:!text-paper ${modelOpen === a.id ? "!text-amber" : "!text-amber/80"}`}
+                onClick={() => setModelOpen(modelOpen === a.id ? null : a.id)}
+                data-note="an interactive 3D model — drag to orbit, scroll to zoom">
+                {modelOpen === a.id ? "▾" : "◈"} 3D model: {a.name}
+              </button>
+            ) : (
+              <a key={a.id} className="label hover:!text-paper !text-amber"
+                 href={`${a.url}?query_id=${ex.queryId}`} target="_blank" rel="noreferrer"
+                 data-note={isTask ? "the file the task produced — opens in the browser" : "compiled by the reporting agent from the verification matrix"}>
+                {isTask ? `${a.name} ↗` : "audit report ↗"}
+              </a>
+            )
           ))}
         </div>
       )}
@@ -194,6 +212,10 @@ export function ExchangeView({ ex, index }: { ex: Exchange; index: number }) {
       {gridOpen && !running && <div className="mt-4"><Grid ex={ex} showDraft={draft} /></div>}
       {graphOpen && <div className="mt-4 rule-t pt-3"><Graph3D ex={ex} /></div>}
       {flowOpen && <div className="mt-4 rule-t pt-3"><Flowchart ex={ex} /></div>}
+      {modelOpen && (() => {
+        const a = ex.artifacts.find((x) => x.id === modelOpen);
+        return a ? <div className="mt-4"><ModelViewer url={`${a.url}?query_id=${ex.queryId}`} /></div> : null;
+      })()}
 
       {ex.notes.length > 0 && (
         <div className="mt-5 space-y-1">

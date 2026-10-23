@@ -81,7 +81,7 @@ async def run_reporter(query_id: str, question: str, ld: dict, trust: dict,
                           "detail": "compiling the audit report"})
     ws = Path(config.DATA_DIR) / "artifacts" / query_id
     ctx = Ctx(agent="reporter", emit=emit, registry=reg, cancel=cancel, workspace=str(ws))
-    sp = spec("reporter", tools=("run_python", "write_file", "make_document"),
+    sp = spec("reporter", tools=("run_python", "run_shell", "write_file", "make_document"),
               max_steps=6, num_ctx=32768)
     try:
         await run_agent(sp, ctx, _brief(question, ld, trust, cells_, retracted, reg))

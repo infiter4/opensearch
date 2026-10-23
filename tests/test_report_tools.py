@@ -31,6 +31,28 @@ def test_run_python_executes_in_workspace(tmp_path):
     assert (tmp_path / "made.txt").read_text() == "hi"
 
 
+def test_run_shell_does_light_filesystem_work(tmp_path):
+    # The user's ask: create a folder and do light co-work via the terminal. Portable POSIX only,
+    # so this passes identically on macOS (BSD userland) and Linux.
+    out = asyncio.run(dispatch("run_shell", {
+        "command": "mkdir -p out/sub && printf 'hi' > out/sub/note.txt && ls out",
+    }, _ctx(tmp_path, [])))
+    assert "exit=0" in out and "sub" in out
+    assert (tmp_path / "out/sub/note.txt").read_text() == "hi"
+
+
+def test_run_shell_runs_in_the_workspace(tmp_path):
+    out = asyncio.run(dispatch("run_shell", {"command": "pwd"}, _ctx(tmp_path, [])))
+    # macOS resolves /var -> /private/var and TMPDIR lives there; compare resolved paths.
+    assert str(tmp_path.resolve()) in out
+
+
+def test_run_shell_reports_nonzero_exit_as_information(tmp_path):
+    out = asyncio.run(dispatch("run_shell", {"command": "ls /no/such/path/here"}, _ctx(tmp_path, [])))
+    assert "exit=" in out and not out.startswith("ERROR:"), \
+        "a failing command is model-actionable output, not a tool crash"
+
+
 def test_run_python_reports_errors_as_information(tmp_path):
     out = asyncio.run(dispatch("run_python", {"code": "1/0"}, _ctx(tmp_path, [])))
     assert "ZeroDivisionError" in out and not out.startswith("ERROR:"), \
@@ -64,6 +86,18 @@ def test_run_python_timeout_kills(tmp_path):
     report_tools.RUN_TIMEOUT, saved = 1.0, report_tools.RUN_TIMEOUT
     try:
         out = asyncio.run(dispatch("run_python", {"code": "import time; time.sleep(5)"}, _ctx(tmp_path, [])))
+        assert "killed" in out
+    finally:
+        report_tools.RUN_TIMEOUT = saved
+
+
+@pytest.mark.slow
+def test_run_shell_timeout_reaps_the_process_group(tmp_path):
+    # A shell that backgrounds a sleeper: killing only the direct child (the macOS trap) would
+    # orphan the sleeper. start_new_session + killpg reaps the whole tree.
+    report_tools.RUN_TIMEOUT, saved = 1.0, report_tools.RUN_TIMEOUT
+    try:
+        out = asyncio.run(dispatch("run_shell", {"command": "sleep 30 & sleep 30"}, _ctx(tmp_path, [])))
         assert "killed" in out
     finally:
         report_tools.RUN_TIMEOUT = saved

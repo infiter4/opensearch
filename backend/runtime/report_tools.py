@@ -1,13 +1,25 @@
-"""The reporter's hands: run code, write files, publish a document. Deep mode only.
+"""The reporter's hands: run code, run shell commands, write files, publish a document.
 
-Scoped hard on purpose. Three tools, one sandbox directory per run, 30s per execution — enough to
-compute over the verdict matrix and produce an artifact, not enough to become a general shell.
-Every path is resolved and must stay inside the run's workspace; escapes are an error the model
-sees, not an exception.
+Scoped on purpose. A sandbox directory per run, a timeout per execution — enough to compute over
+the verdict matrix, do light filesystem work (make a folder, move a file), and produce an
+artifact. Every relative path is resolved and must stay inside the run's workspace; escapes are an
+error the model sees, not an exception.
+
+Portability: everything here is POSIX and works identically on macOS (BSD userland, zsh/sh) and
+Linux. Two macOS-specific traps are handled deliberately:
+  * Timeout kill reaps the whole *process group*, not just the direct child. `create_subprocess_*`
+    with `start_new_session=True` puts the child in its own session; on timeout we SIGKILL the
+    group so a shell's grandchildren (`mkdir & sleep 999 &`) die with it instead of orphaning.
+  * The workspace guard uses `Path.is_relative_to`, not a hand-rolled string prefix with a
+    hardcoded "/" separator.
+Shell commands run through `/bin/sh -c`, which exists on both platforms — never `/bin/bash`
+(macOS ships an ancient bash 3.2) and never GNU-only coreutils flags.
 """
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import sys
 import uuid
 from pathlib import Path
@@ -29,10 +41,45 @@ def _workspace(ctx: Ctx) -> Path:
 
 
 def _inside(ws: Path, name: str) -> Path:
-    p = (ws / name).resolve()
-    if not str(p).startswith(str(ws.resolve()) + "/") and p != ws.resolve():
+    root = ws.resolve()
+    p = (root / name).resolve()
+    if p != root and not p.is_relative_to(root):
         raise ValueError(f"path escapes the workspace: {name}")
     return p
+
+
+def _kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Kill the child and everything it spawned. POSIX process-group kill — macOS and Linux."""
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # Group already gone, or we couldn't signal it — fall back to the direct child.
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
+async def _execute(proc_factory, timeout: float) -> str:
+    """Run a subprocess started in its own session, cap output, and reap the group on timeout."""
+    proc = await proc_factory()
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        _kill_tree(proc)
+        # Drain the pipe so the transport closes cleanly and we don't leak the reader task.
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+        return f"ERROR: execution exceeded {timeout:.0f}s and was killed"
+    text = out.decode(errors="replace")
+    if len(text) > MAX_OUT:
+        text = text[:MAX_OUT] + f"\n… truncated ({len(text)} chars total)"
+    body = text if text.strip() else "(no output)"
+    return f"exit={proc.returncode}\n{body}"
 
 
 @tool(
@@ -43,21 +90,44 @@ def _inside(ws: Path, name: str) -> Path:
 )
 async def run_python(args: dict, ctx: Ctx) -> str:
     ws = _workspace(ctx)
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", str(args.get("code") or ""),
-        cwd=ws,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+    code = str(args.get("code") or "")
+    return await _execute(
+        lambda: asyncio.create_subprocess_exec(
+            sys.executable, "-c", code,
+            cwd=ws,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        ),
+        RUN_TIMEOUT,
     )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=RUN_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        return f"ERROR: execution exceeded {RUN_TIMEOUT:.0f}s and was killed"
-    text = out.decode(errors="replace")
-    if len(text) > MAX_OUT:
-        text = text[:MAX_OUT] + f"\n… truncated ({len(text)} chars total)"
-    return f"exit={proc.returncode}\n{text}" if text.strip() else f"exit={proc.returncode} (no output)"
+
+
+@tool(
+    "run_shell",
+    "Run a shell command in the run workspace and return its combined stdout/stderr. 30s limit. "
+    "Runs under /bin/sh with the workspace as the working directory — good for light filesystem "
+    "work like making a folder (mkdir -p), moving or listing files. Use portable POSIX commands "
+    "(they run the same on macOS and Linux); avoid GNU-only flags. Relative paths stay in the "
+    "sandbox.",
+    obj({"command": {"type": "string", "description": "shell command, e.g. mkdir -p out && ls"}},
+        ["command"]),
+)
+async def run_shell(args: dict, ctx: Ctx) -> str:
+    ws = _workspace(ctx)
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return "ERROR: empty command"
+    return await _execute(
+        lambda: asyncio.create_subprocess_shell(
+            command,
+            cwd=ws,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        ),
+        RUN_TIMEOUT,
+    )
 
 
 @tool(
@@ -96,6 +166,38 @@ _DOC_SHELL = """<!doctype html>
 {body}
 </body></html>
 """
+
+
+@tool(
+    "make_model",
+    "Publish a 3D model file you wrote in the workspace (.glb preferred, or .stl/.gltf/.obj) as a "
+    "viewable artifact — the user gets an interactive 3D viewer. Build the geometry first with "
+    "run_python using `trimesh` (+ numpy): primitives via trimesh.creation.box/cylinder/..., "
+    "boolean CSG via trimesh.boolean.union/difference, transforms via apply_translation, then "
+    "mesh.export('part.glb'). Call this with that path.",
+    obj({
+        "path": {"type": "string", "description": "relative path to the model file, e.g. part.glb"},
+        "title": {"type": "string"},
+    }, ["path"]),
+)
+async def make_model(args: dict, ctx: Ctx) -> str:
+    ws = _workspace(ctx)
+    p = _inside(ws, str(args.get("path") or ""))
+    ext = p.suffix.lower()
+    if ext not in (".glb", ".gltf", ".stl", ".obj"):
+        return f"ERROR: unsupported model format {ext!r}; write a .glb/.stl/.gltf/.obj first"
+    if not p.exists():
+        return f"ERROR: no such file {p.name} — write the model in the workspace before publishing"
+    size = p.stat().st_size
+    if size > MAX_FILE * 25:      # models are bigger than text; allow ~10MB
+        return f"ERROR: model too large ({size} bytes)"
+
+    art_id = uuid.uuid4().hex[:10]
+    ctx.emit("artifact", {
+        "id": art_id, "name": p.name, "kind": "model", "format": ext.lstrip("."),
+        "bytes": size, "url": f"/api/artifact/{art_id}", "path": str(p),
+    })
+    return f"published 3D model {p.name} ({size} bytes) at /api/artifact/{art_id}"
 
 
 @tool(

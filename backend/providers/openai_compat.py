@@ -164,6 +164,27 @@ async def _retry(model, messages, tools, temperature, timeout):
             await asyncio.sleep(delay)
 
 
+async def embeddings(model: str, texts: list[str], timeout: float = 120.0) -> list[list[float]]:
+    """Embed a batch via an OpenAI-shaped /embeddings endpoint (Google/OpenAI-compat). Caching
+    lives in the llm facade. Order is preserved by `index` per the OpenAI spec."""
+    prefix, real = _split(model)
+    base, env = ENDPOINTS[prefix]
+    key = _key(env)
+    if not key:
+        raise LLMError(f"{model}: no {env} configured")
+    payload = {"model": real, "input": texts}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
+        resp = await client.post(
+            f"{base}/embeddings", json=payload,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+        if resp.status_code != 200:
+            raise LLMError(f"{model}: HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+    rows = sorted(data.get("data", []), key=lambda d: d.get("index", 0))
+    return [d["embedding"] for d in rows]
+
+
 async def _once(model, messages, tools, temperature, timeout):
     prefix, real = _split(model)
     base, env = ENDPOINTS[prefix]
