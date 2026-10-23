@@ -123,6 +123,8 @@ async def extract(question: str, answer_text: str) -> dict:
             num_ctx=16384,
             temperature=0.1,
         )
-    except Exception:
-        return {"nodes": [], "links": []}
+    except Exception as e:
+        # Still empty, still never raising — but SAID. A bare empty graph read as "nothing to
+        # chart in this answer" when the truth was that the extraction call failed.
+        return {"nodes": [], "links": [], "error": f"the extraction call failed ({type(e).__name__})"}
     return _clean(raw, question)

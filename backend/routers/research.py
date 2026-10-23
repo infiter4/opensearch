@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from .. import config, sessions, sse
 from ..pipeline import concept, orchestrator
-from ..providers import cache
+from ..providers import cache, runcfg
 
 router = APIRouter(prefix="/api")
 
@@ -53,6 +53,9 @@ async def _drive(s: sessions.Session) -> None:
                 s.sources[data["id"]] = data
             elif event == "artifact":
                 s.artifacts[data["id"]] = data
+                # The on-disk path stays here, server-side, for /api/artifact. The client uses
+                # id/name/url/kind; an absolute path in the stream is a map of the server's disk.
+                data = {k: v for k, v in data.items() if k != "path"}
             elif event == "answer_done":
                 s.answer_text = data.get("text") or ""
             s.push(event, data)
@@ -83,8 +86,12 @@ async def stream(query_id: str, request: Request) -> StreamingResponse:
 
     # Resume point: the browser's own Last-Event-ID on an automatic reconnect, else ?from=,
     # else the beginning — a fresh page replays the buffer instantly and then follows live.
+    # Last-Event-ID names the last event the browser GOT, so resume one past it; resuming AT it
+    # re-delivered that event on every reconnect (a doubled token in the live draft). `from=` is
+    # an index to start at and keeps that meaning.
     try:
-        start = int(request.headers.get("last-event-id") or request.query_params.get("from") or 0)
+        last_seen = request.headers.get("last-event-id")
+        start = int(last_seen) + 1 if last_seen else int(request.query_params.get("from") or 0)
     except ValueError:
         start = 0
 
@@ -156,7 +163,20 @@ async def concept_graph(query_id: str) -> dict:
     if s.concept is None:
         if not s.answer_text:
             return {"nodes": [], "links": [], "pending": True}
-        s.concept = await concept.extract(s.question, s.answer_text)
+
+        # The run's BYOK models/keys live in the run task's ContextVars, not in this request's —
+        # without this the graph was built on the server's default model and key, whatever the
+        # user picked. A task of its own, so the overrides never touch the request context.
+        async def _extract() -> dict:
+            runcfg.set_run_overrides(s.models, s.keys)
+            return await concept.extract(s.question, s.answer_text)
+
+        graph = await asyncio.create_task(_extract())
+        # extract() answers a failure with an empty graph. Keep only a real one, or one failed
+        # call would pin the view empty for the life of the session.
+        if not graph.get("nodes"):
+            return graph
+        s.concept = graph
     return s.concept
 
 
@@ -178,4 +198,10 @@ async def artifact(artifact_id: str, query_id: str) -> FileResponse:
         ".stl": "model/stl", ".obj": "text/plain", ".scad": "text/plain",
         ".csv": "text/csv", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml",
     }.get(p.suffix.lower(), "application/octet-stream")
-    return FileResponse(p, media_type=media)
+    # An HTML artifact is model-written, and in deep mode built from web pages. Through the vite
+    # proxy it is served on the APP's origin, so its scripts could read the saved threads and
+    # call the API. `sandbox` gives it an opaque origin and no scripts; it still renders and prints.
+    return FileResponse(p, media_type=media, headers={
+        "Content-Security-Policy": "sandbox",
+        "X-Content-Type-Options": "nosniff",
+    })

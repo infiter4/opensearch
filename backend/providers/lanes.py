@@ -19,6 +19,13 @@ from .rrf import domain, normalize_url
 _UA = {"User-Agent": "receipts/0.1 (research verifier; +https://github.com/local/receipts)"}
 
 
+class LaneError(RuntimeError):
+    """A lane or fetcher that could not answer — no key, a 429, a 5xx. RAISED, never returned as
+    []/{}: cached_call records whatever call() returns, so an empty result here was recorded as
+    the answer, and one Jina 429 blanked that URL for every later run, replay included.
+    search_all and fetch already turn a raise into "this lane contributed nothing"."""
+
+
 # ─────────────────────────── search lanes ───────────────────────────
 
 async def search_ollama(query: str, max_results: int = 8) -> list[dict]:
@@ -29,7 +36,7 @@ async def search_ollama(query: str, max_results: int = 8) -> list[dict]:
     async def call() -> list[dict]:
         key = os.environ.get("OLLAMA_API_KEY")
         if not key:
-            return []
+            raise LaneError("ollama search: no OLLAMA_API_KEY")
         async with httpx.AsyncClient(timeout=45.0) as c:
             r = await c.post(
                 f"{config.OLLAMA_CLOUD_URL}/api/web_search",
@@ -51,13 +58,14 @@ async def search_ollama(query: str, max_results: int = 8) -> list[dict]:
 
 async def search_tavily(query: str, max_results: int = 8) -> list[dict]:
     """include_raw_content=True returns full page text, which lets the fetch chain skip a
-    round-trip entirely for Tavily-sourced URLs. Degrades to [] with no key — never blocks."""
+    round-trip entirely for Tavily-sourced URLs. Raises with no key; search_all turns that into
+    [] for this lane — never blocks."""
     req = {"query": query, "max_results": max_results, "include_raw_content": True}
 
     async def call() -> list[dict]:
         key = config.api_key("TAVILY_API_KEY")
         if not key:
-            return []
+            raise LaneError("tavily search: no TAVILY_API_KEY")
         async with httpx.AsyncClient(timeout=45.0) as c:
             r = await c.post(
                 "https://api.tavily.com/search",
@@ -65,7 +73,7 @@ async def search_tavily(query: str, max_results: int = 8) -> list[dict]:
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             )
             if r.status_code != 200:
-                return []
+                raise LaneError(f"tavily search: HTTP {r.status_code}")
             d = r.json()
             out = []
             for x in d.get("results") or []:
@@ -97,7 +105,7 @@ async def search_openalex(query: str, max_results: int = 6) -> list[dict]:
                 headers=_UA,
             )
             if r.status_code != 200:
-                return []
+                raise LaneError(f"openalex search: HTTP {r.status_code}")
             out = []
             for w in r.json().get("results") or []:
                 url = w.get("doi") or (w.get("primary_location") or {}).get("landing_page_url") or ""
@@ -155,7 +163,7 @@ async def _fetch_ollama(url: str) -> dict[str, Any]:
     async def call() -> dict[str, Any]:
         key = os.environ.get("OLLAMA_API_KEY")
         if not key:
-            return {}
+            raise LaneError("ollama fetch: no OLLAMA_API_KEY")
         async with httpx.AsyncClient(timeout=config.FETCH_TIMEOUT) as c:
             r = await c.post(
                 f"{config.OLLAMA_CLOUD_URL}/api/web_fetch",
@@ -163,7 +171,7 @@ async def _fetch_ollama(url: str) -> dict[str, Any]:
                 headers={"Authorization": f"Bearer {key}", **_UA},
             )
             if r.status_code != 200:
-                return {}
+                raise LaneError(f"ollama fetch: HTTP {r.status_code}")
             d = r.json()
             return {"title": d.get("title") or "", "content": d.get("content") or ""}
 
@@ -177,7 +185,7 @@ async def _fetch_jina(url: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=config.FETCH_TIMEOUT, follow_redirects=True) as c:
             r = await c.get(f"https://r.jina.ai/{url}", headers=_UA)
             if r.status_code != 200:
-                return {}
+                raise LaneError(f"jina fetch: HTTP {r.status_code}")
             text = r.text
             title = ""
             if text.startswith("Title:"):
@@ -193,12 +201,18 @@ async def fetch(url: str, body: str = "") -> dict[str, Any]:
 
     Returns {} when every fetcher fails — the caller DROPS the source rather than verifying a
     claim against an empty body, which would produce a confident but meaningless 'unsupported'.
+
+    Content is cut to SOURCE_BODY_CHARS HERE, where every page enters the agent and verify path.
+    The cut used to live only in fetch_many, which nothing calls — so read_page handed agents and
+    every verify prompt whole pages (Tavily raw_content, Jina markdown: 100k+ chars), far past
+    num_ctx.
     """
     url = normalize_url(url)
     thin = config.THIN_CONTENT_CHARS
+    cap = config.SOURCE_BODY_CHARS
 
     if body and len(body) >= thin:
-        return {"url": url, "title": "", "content": body, "via": "lane:body"}
+        return {"url": url, "title": "", "content": body[:cap], "via": "lane:body"}
 
     for name, fn in (("ollama", _fetch_ollama), ("jina", _fetch_jina)):
         try:
@@ -206,10 +220,11 @@ async def fetch(url: str, body: str = "") -> dict[str, Any]:
         except Exception:
             continue
         if d and len(d.get("content") or "") >= thin:
-            return {"url": url, "title": d.get("title") or "", "content": d["content"], "via": name}
+            return {"url": url, "title": d.get("title") or "", "content": d["content"][:cap],
+                    "via": name}
 
     if body:
-        return {"url": url, "title": "", "content": body, "via": "lane:body(short)"}
+        return {"url": url, "title": "", "content": body[:cap], "via": "lane:body(short)"}
     return {}
 
 

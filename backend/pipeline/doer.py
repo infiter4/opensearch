@@ -48,7 +48,9 @@ async def run_task(question: str, query_id: str, emit, cancel, history=None) -> 
         out = await run_agent(sp, ctx, prompt)
     except Exception as e:
         emit("agent_status", {"agent_id": "doer", "status": "failed", "detail": str(e)[:160]})
-        emit("error", {"scope": "doer", "message": f"{type(e).__name__}: {e}"})
+        # Scope "run": a task run is nothing but this agent, so its failure IS the run's. Scoped
+        # "doer", the UI filed it as a side note and showed the error text as a finished answer.
+        emit("error", {"scope": "run", "message": f"{type(e).__name__}: {e}"})
         return f"The task could not be completed: {type(e).__name__}: {e}"
     emit("agent_status", {"agent_id": "doer", "status": "done"})
     return out

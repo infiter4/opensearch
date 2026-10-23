@@ -48,12 +48,29 @@ def _inside(ws: Path, name: str) -> Path:
     return p
 
 
+def _sandbox_env(ws: Path) -> dict[str, str]:
+    """Just enough environment to run, and none of the server's credentials. Inheriting os.environ
+    handed every child OLLAMA_API_KEY, TAVILY_API_KEY and the DB URL with its password — one `env`
+    and they were in the tool output, the SSE stream and the committed cache.
+    The interpreter's own bin dir leads PATH so `python3` in a shell is the venv (numpy/trimesh)."""
+    bindir = str(Path(sys.executable).parent)
+    return {
+        "PATH": os.pathsep.join([bindir, os.environ.get("PATH") or os.defpath]),
+        "HOME": str(ws.resolve()),
+        "LANG": os.environ.get("LANG") or "C.UTF-8",
+        "PYTHONIOENCODING": "utf-8",
+    }
+
+
 def _kill_tree(proc: asyncio.subprocess.Process) -> None:
-    """Kill the child and everything it spawned. POSIX process-group kill — macOS and Linux."""
-    if proc.returncode is not None:
-        return
+    """Kill the child and everything it spawned. POSIX process-group kill — macOS and Linux.
+
+    Unconditional, by group id. `sleep 99 & echo ok` exits its shell at once, so the direct child
+    already has a returncode while the sleeper it left behind holds the pipe — exactly the tree
+    to reap. start_new_session made the child a group leader, so its pid IS the group id, and
+    killpg still reaches the group after the leader itself is gone."""
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         # Group already gone, or we couldn't signal it — fall back to the direct child.
         try:
@@ -75,6 +92,11 @@ async def _execute(proc_factory, timeout: float) -> str:
         except (asyncio.TimeoutError, ProcessLookupError):
             pass
         return f"ERROR: execution exceeded {timeout:.0f}s and was killed"
+    except BaseException:
+        # A stop cancels this coroutine mid-run. Without the kill the child outlived the run:
+        # observed, a cancelled `sleep 42` still alive after the run reported "cancelled".
+        _kill_tree(proc)
+        raise
     text = out.decode(errors="replace")
     if len(text) > MAX_OUT:
         text = text[:MAX_OUT] + f"\n… truncated ({len(text)} chars total)"
@@ -95,6 +117,7 @@ async def run_python(args: dict, ctx: Ctx) -> str:
         lambda: asyncio.create_subprocess_exec(
             sys.executable, "-c", code,
             cwd=ws,
+            env=_sandbox_env(ws),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
@@ -122,6 +145,7 @@ async def run_shell(args: dict, ctx: Ctx) -> str:
         lambda: asyncio.create_subprocess_shell(
             command,
             cwd=ws,
+            env=_sandbox_env(ws),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,

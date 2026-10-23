@@ -75,7 +75,9 @@ async def run_subagent(
     )
     extra = _CORPUS_EXTRA if workspace else ""
     if subtask.get("role") == "red_team":
-        extra = _RED_TEAM_EXTRA
+        # ADDED to, never replacing, the corpus instructions: replaced, a deep-mode red team in a
+        # workspace held only corpus tools while its prompt still talked about web_search.
+        extra += _RED_TEAM_EXTRA
 
     emit("agent_status", {"agent_id": aid, "status": "drafting"})
     try:

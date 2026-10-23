@@ -94,3 +94,53 @@ def test_classify_carries_a_mode_and_corpus_nudges_lite_to_pro():
     assert r["mode"] == "lite"
     r2 = asyncio.run(router.classify("what is the payload", corpus_available=True))
     assert r2["mode"] == "pro", "a real corpus should nudge a trivial question up to pro"
+
+
+def test_research_questions_that_mention_a_format_never_fast_path_to_a_task():
+    # Not addressed as a request, so the fast path must not send them to the shell agent. Each one
+    # used to match a task pattern somewhere in the middle and route straight to the doer.
+    for q in [
+        "Best way to convert HTML to PDF in Python",
+        "Best CAD software for beginners in 2026",
+        "Median household income in a zip code like 10001",
+        "Docker build image size optimization tips",
+        "Python file I/O: appending to a file vs overwriting",
+        "Best 3d model formats for the web",
+        "Pandas: read a CSV vs write to a CSV performance",
+        "Should I make a box plot or a violin plot for skewed data",
+        "Top open-source tools to export Jupyter notebooks to PDF",
+        "Mistral vs Llama: which model is better for part-of-speech tagging",
+    ]:
+        assert router.fast_route(q) != "task", q
+
+
+def test_unaddressed_mentions_default_to_research_when_the_model_is_unavailable(monkeypatch):
+    async def boom(model, messages, **kw):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(router.llm, "complete_json", boom)
+    r = asyncio.run(router.classify("Best way to convert HTML to PDF in Python"))
+    assert r["kind"] == "research" and r["via"] == "default"
+
+
+def test_requests_with_a_conversational_lead_in_are_still_tasks():
+    for q in ["ok, now make it a pdf", "great thanks. please turn that into a csv",
+              "help me turn this into a spreadsheet", "I want you to save this as a markdown file"]:
+        assert router.fast_route(q) == "task", q
+
+
+def test_router_model_honours_the_runs_override(monkeypatch):
+    seen = []
+
+    async def fake(model, messages, **kw):
+        seen.append(model)
+        return {"kind": "research", "title": "t", "reason": "r"}
+
+    monkeypatch.setattr(router.llm, "complete_json", fake)
+
+    async def go():
+        router.llm.set_run_overrides({"router": "groq/llama-3.3-70b"}, {})
+        return await router.classify("the quarterly numbers, please")   # ambiguous -> model
+
+    asyncio.run(go())
+    assert seen == ["groq/llama-3.3-70b"], "the router ignored the run's BYOK model pick"

@@ -7,6 +7,7 @@ and every slip there is a chip pointing at the wrong source.
 """
 from __future__ import annotations
 
+from .. import config
 from ..providers import lanes, rrf
 from .tools import Ctx, obj, tool
 
@@ -31,7 +32,7 @@ async def web_search(args: dict, ctx: Ctx) -> str:
     # Stash bodies lanes already gave us so read_page can skip the fetch chain.
     for f in fused:
         if f.get("body"):
-            _BODIES[rrf.normalize_url(f["url"])] = f["body"]
+            _stash(rrf.normalize_url(f["url"]), f["body"])
 
     out = []
     for i, f in enumerate(fused, 1):
@@ -41,7 +42,17 @@ async def web_search(args: dict, ctx: Ctx) -> str:
     return "\n".join(out)
 
 
+# url -> page text a lane already returned. Process-wide and shared by every run, so it is
+# capped (oldest out first) and each body is cut to what fetch would keep anyway: unbounded, it
+# grew by up to a full page per search result for the life of the server.
 _BODIES: dict[str, str] = {}
+_BODIES_MAX = 512
+
+
+def _stash(url: str, body: str) -> None:
+    _BODIES[url] = body[: config.SOURCE_BODY_CHARS]
+    while len(_BODIES) > _BODIES_MAX:
+        _BODIES.pop(next(iter(_BODIES)))
 
 
 @tool(

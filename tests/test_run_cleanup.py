@@ -13,8 +13,41 @@ restarting the server "fixed" it, which is what made it look like a provider pro
 from __future__ import annotations
 
 import asyncio
+import json
 
+import pytest
+
+from backend import config
 from backend.pipeline import orchestrator, rewrite, verify
+from backend.providers import cache, llm
+
+
+@pytest.fixture(autouse=True)
+def _no_live_models(monkeypatch, tmp_path):
+    """Hermetic: this drives the real orchestrator, which used to make a LIVE planner call on
+    every pytest run. Every model turn now goes through a fake — the planner answers at once, a
+    sub-agent is still in flight when the reader leaves (the case under test), and anything else
+    (the router) gets an unparseable reply, i.e. its offline default. And
+    should a call ever slip past the fake, replay mode against an empty temp cache turns it into
+    a CacheMiss instead of a network call or a write to data/cache.sqlite."""
+    monkeypatch.setattr(config, "RESEARCH_MODE", "replay")
+    monkeypatch.setattr(config, "CACHE_DB", tmp_path / "cache.sqlite")
+    monkeypatch.setattr(cache, "_conn", None, raising=False)
+
+    def fake_chat(model, messages, **kw):
+        async def turn():
+            system = messages[0]["content"] if messages else ""
+            content = ""
+            if system.startswith("You break a research question"):
+                content = json.dumps([{"title": "Limits", "subquery": "What are the limits?",
+                                       "lane": "web"}])
+            elif system.startswith("You research one narrow question"):
+                await asyncio.sleep(30)      # a sub-agent mid-call when the browser goes away
+            yield {"type": "done", "content": content, "thinking": "", "calls": [],
+                   "message": {"role": "assistant", "content": content}}
+        return turn()
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
 
 
 async def _abandon_mid_run() -> None:

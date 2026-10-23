@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import re
 
-from .. import config
 from ..providers import llm
 
 VALID = ("research", "task")
@@ -57,6 +56,22 @@ _CAD_VERB = re.compile(r"\b(?:design|model|build|print|make|create|generate|fabr
 _CAD_NOUN = re.compile(
     r"\b(?:bracket|gear|mount|enclosure|flange|gasket|pulley|coupler|housing|standoff|spacer|"
     r"hinge|clip|part|knob|handle|adapter|jig|fixture|gizmo|widget|box|plate|cylinder|tube)\b",
+    re.I,
+)
+
+# A task is something said TO the assistant: an imperative ("make this a pdf") or a polite request
+# ("could you ..."). The patterns above match ANYWHERE, so on their own they also fired inside
+# ordinary research questions that merely mention a format or a build verb — "best way to convert
+# HTML to PDF in Python", "best CAD software", "median income in a zip code" all went to the shell
+# agent. A task match now only counts when the message is addressed as a request; anything else is
+# left to the model, whose own fallback is research.
+_REQUEST = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|great|perfect|thanks|thank\s+you|cool|nice|now|and|also|so|then|hey|hi)"
+    r"\b[\s,!.]*)*"
+    r"(?:please|pls|kindly|(?:can|could|would|will)\s+(?:you|u)|i\s+(?:want|need|would\s+like)\s+you\s+to"
+    r"|go\s+ahead\s+and|help\s+me"
+    r"|make|turn|convert|compile|save|export|render|format|create|generate|build|write|produce|give"
+    r"|put|mkdir|zip|rename|delete|remove|move|copy|design|fabricate)\b",
     re.I,
 )
 
@@ -108,6 +123,8 @@ def fast_route(text: str) -> str | None:
         return None
     if _RESEARCH.match(t):
         return "research"
+    if not _REQUEST.match(t):
+        return None     # mentions a format or a build verb, but is not asking us to DO anything
     if _TASK.search(t):
         return "task"
     # "design a parametric L-bracket with holes" — a build verb plus a physical/CAD noun anywhere.
@@ -142,7 +159,7 @@ async def classify(question: str, history: list[dict] | None = None,
                     f'{str(last.get("question") or "")[:120]})'
     try:
         raw = await llm.complete_json(
-            config.MODELS["router"],
+            llm.model_for("router"),   # the run's BYOK pick, like every other stage
             [{"role": "system", "content": _SYS},
              {"role": "user", "content": f"Message: {question}{prior}"}],
             num_ctx=4096, temperature=0.0,

@@ -20,7 +20,11 @@ from backend.pipeline.sources import SourceRegistry
 from backend.routers.research import source
 
 
-def test_orchestrator_hands_the_registry_to_its_caller():
+def test_orchestrator_hands_the_registry_to_its_caller(monkeypatch):
+    # "q" is ambiguous to the router, which would consult its model before `meta`. Offline here.
+    async def offline(model, messages, **kw):
+        raise RuntimeError("no live model calls in tests")
+    monkeypatch.setattr(orchestrator.router.llm, "complete_json", offline)
     seen: list[SourceRegistry] = []
 
     async def go():

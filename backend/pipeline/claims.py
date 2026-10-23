@@ -26,8 +26,9 @@ Do NOT invent claims. Do NOT include opinions, hedges, or questions. If a senten
 checkable factual assertion, omit it entirely.
 
 Reply with ONLY a JSON array:
-[{"sentence_id": "s3", "text": "<standalone atomic claim>", "source_ids": [3]}]
+[{"sentence_id": "a1.s3", "text": "<standalone atomic claim>", "source_ids": [3]}]
 
+sentence_id is the id in square brackets at the start of the sentence's line, copied exactly.
 source_ids MUST be a subset of the markers actually present in that sentence. Never add a source
 the sentence did not cite."""
 
@@ -67,11 +68,14 @@ async def extract(agent_id: str, sentences: list[Sentence]) -> list[dict]:
     for c in raw:
         if not isinstance(c, dict):
             continue
-        sid = str(c.get("sentence_id") or "").strip()
-        s = by_id.get(sid)
+        sid = str(c.get("sentence_id") or "").strip().strip("[]")
+        # Measured: ~1 response in 12 answers with the bare "s3" for "a2.s3" (the old prompt
+        # example said "s3"). Strict lookup dropped every claim and fell back to whole sentences.
+        s = by_id.get(sid) or by_id.get(f"{agent_id}.{sid}")
         text = str(c.get("text") or "").strip()
         if not s or not text:
             continue
+        sid = s.id
         ids = c.get("source_ids") or []
         if not isinstance(ids, list):
             ids = [ids]

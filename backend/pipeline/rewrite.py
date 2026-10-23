@@ -18,13 +18,16 @@ into an honest one.
 from __future__ import annotations
 
 import asyncio
+import re
 
 from .. import config
 from ..providers import llm
 from . import claims as claims_mod
-from . import segment, verify
+from . import renumber, segment, verify
 
 RETRACT = "RETRACT"
+# Decoration a model wraps the token in: "**RETRACT**", "`RETRACT`", "> RETRACT".
+_LEAD_NOISE = re.compile(r"^[\W_]+")
 
 # GLOBAL, and small on purpose. Every agent repairs concurrently, so without a shared bound the
 # fan-out is (agents × failing sentences) — deep mode fired 29 rewrites at once. The rewriter is
@@ -86,9 +89,15 @@ async def _rewrite_one(sentence, cells_for_sentence: list[dict], reg) -> str:
     except Exception:
         return RETRACT  # a rewriter that cannot answer must not leave the bad sentence standing
     out = (out or "").strip().strip('"').strip()
-    if not out or out.upper().startswith(RETRACT):
+    if not out or _LEAD_NOISE.sub("", out).upper().startswith(RETRACT):
         return RETRACT
-    return out.split("\n")[0].strip()
+    out = renumber.expand(out.split("\n")[0].strip())
+    # A "repair" that no longer cites any of the sentence's own sources is not a repair. With no
+    # [n] it stops being a claim candidate, so it is never verified, its row leaves the board, and
+    # it is not counted as retracted either — a failure laundered into unchecked prose. Retract.
+    if not set(renumber.markers(out)) & set(sentence.cited):
+        return RETRACT
+    return out
 
 
 def _failing(cells_: list[dict]) -> dict[str, list[dict]]:

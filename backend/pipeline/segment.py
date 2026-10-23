@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .renumber import MARKER
+from .renumber import marker_spans, markers
 
 # Abbreviations whose trailing period is not a sentence end.
 _ABBREV = {
@@ -24,7 +24,12 @@ _ABBREV = {
 }
 
 _FENCE = re.compile(r"```.*?```", re.S)
-_BOUNDARY = re.compile(r"[.!?]+[\"')\]]*(?=\s|$)")
+# Group 1 is the punctuation run; group 2 is any [n] markers written AFTER it on the same line.
+# Writers do this constantly ("…the core finding. [1][2]", "…queries.[5] Multiple…"). Ending the
+# sentence at the period handed its markers to the NEXT sentence — the real claim went unchecked
+# and its neighbour was verified against a source it never cited. The markers stay with the
+# sentence they follow; same line only, so a reference list under a paragraph is not swallowed.
+_BOUNDARY = re.compile(r"([.!?]+[\"')\]]*)((?:[ \t]*\[\d{1,3}\])*)(?=\s|$)")
 # Blank line, or a markdown list/heading marker at line start — structural breaks.
 _BLOCK = re.compile(r"\n\s*\n|\n(?=\s*(?:[-*+]\s|\d+\.\s|#{1,6}\s|\|))")
 
@@ -43,7 +48,7 @@ class Sentence:
 
 
 def _cited(text: str) -> tuple[int, ...]:
-    return tuple(sorted({int(m.group(1)) for m in MARKER.finditer(text)}))
+    return tuple(sorted(set(markers(text))))
 
 
 def _masked(text: str) -> str:
@@ -113,12 +118,15 @@ def segment(text: str, prefix: str = "s") -> list[Sentence]:
     for m in _BOUNDARY.finditer(masked):
         if "\x00" in masked[m.start() : m.end()]:
             continue
-        if _is_real_boundary(masked, m.end()):
+        if _is_real_boundary(masked, m.end(1)):
             bounds.add(m.end())
 
     bounds.add(len(text))
     bounds = sorted(b for b in bounds if 0 < b <= len(text))  # type: ignore[assignment]
 
+    # Citations are read off the WHOLE text, not each slice: a fence cut in two by a blank line
+    # inside it no longer looks like code to the slice holding its tail.
+    marks = marker_spans(text)
     out: list[Sentence] = []
     cursor = 0
     n = 0
@@ -136,7 +144,7 @@ def segment(text: str, prefix: str = "s") -> list[Sentence]:
             start=start,
             end=end,
             text=text[start:end],
-            cited=_cited(text[start:end]),
+            cited=tuple(sorted({int(m.group(1)) for m in marks if start <= m.start() < end})),
         ))
         cursor = b
     return out
@@ -161,21 +169,45 @@ def respan(text: str, sentences: list[Sentence], edits: dict[str, str]) -> tuple
     pos = 0
     cursor = 0
     drop_gap = False
+    run_end = 0          # one past the run of consecutive retracted rows we are inside
+    keep_after = False
 
-    for s in sentences:
+    def _gone(j: int) -> bool:
+        return not edits.get(sentences[j].id, sentences[j].text)
+
+    for i, s in enumerate(sentences):
         gap = text[cursor:s.start]
         cursor = s.end
         if drop_gap:
             gap = ""
             drop_gap = False
-        pieces.append(gap)
-        pos += len(gap)
 
         repl = edits.get(s.id, s.text)
         if not repl:
+            # A run of retracted rows takes ONE separator with it — normally the one after the
+            # run. But when that one is structural (a paragraph break, the newline before a
+            # heading or a list item) and the one before is not, the one before goes instead:
+            # retracting the last sentence of a paragraph otherwise glued "## What we could not
+            # establish" onto the end of the previous line, where it no longer renders as a heading.
+            if i >= run_end:
+                run_end = i
+                while run_end < len(sentences) and _gone(run_end):
+                    run_end += 1
+                last = sentences[run_end - 1]
+                after = text[last.end:sentences[run_end].start] if run_end < len(sentences) \
+                    else text[last.end:]
+                keep_after = bool(pos) and "\n" in after and "\n" not in gap
+                if keep_after:
+                    gap = ""
+            # separators inside the run always go; the one after it goes unless kept above
+            drop_gap = not (keep_after and i == run_end - 1)
+            pieces.append(gap)
+            pos += len(gap)
             out.append(Sentence(id=s.id, start=pos, end=pos, text="", cited=()))
-            drop_gap = True  # the separator this sentence consumed goes with it
             continue
+
+        pieces.append(gap)
+        pos += len(gap)
 
         pieces.append(repl)
         out.append(Sentence(id=s.id, start=pos, end=pos + len(repl), text=repl, cited=_cited(repl)))

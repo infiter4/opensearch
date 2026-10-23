@@ -7,13 +7,24 @@ else fails first: the stream is fine, the board fills, and only the click is dea
 """
 import asyncio
 
+import pytest
+
 from backend.pipeline import orchestrator
+
+
+@pytest.fixture(autouse=True)
+def _offline_router(monkeypatch):
+    # "q" matches no fast-path pattern, so the router consults its model before `meta`. Fail
+    # that call (-> the research default) rather than let the test reach a live endpoint.
+    async def offline(model, messages, **kw):
+        raise RuntimeError("no live model calls in tests")
+    monkeypatch.setattr(orchestrator.router.llm, "complete_json", offline)
 
 
 def _first_event(**kw):
     async def go():
         gen = orchestrator.run("q", "lite", **kw)
-        out = await gen.__anext__()  # meta is yielded before any network call
+        out = await gen.__anext__()  # meta: only the (faked) router call runs before it
         await gen.aclose()
         return out
     return asyncio.run(go())

@@ -20,7 +20,13 @@ from . import cache, runcfg
 
 
 class LLMError(RuntimeError):
-    pass
+    """`status` is the HTTP status when there was one; `detail` is the provider's own error text.
+    Retry decisions read these fields, never the formatted message — see _is_transient."""
+
+    def __init__(self, message: str, status: int | None = None, detail: str = ""):
+        super().__init__(message)
+        self.status = status
+        self.detail = detail
 
 
 def _endpoint(model: str) -> tuple[str, dict[str, str]]:
@@ -32,16 +38,26 @@ def _endpoint(model: str) -> tuple[str, dict[str, str]]:
     return config.OLLAMA_LOCAL_URL, {}
 
 
-_TRANSIENT = (
+_RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+_TRANSIENT_TEXT = (
     "internal server error", "bad gateway", "service unavailable", "gateway timeout",
-    "temporarily", "overloaded", "rate limit", "too many requests",
-    "429", "500", "502", "503", "504",
+    "temporarily", "overloaded", "rate limit", "too many requests", "too many concurrent",
 )
 
 
-def _is_transient(err: str) -> bool:
-    e = err.lower()
-    return any(t in e for t in _TRANSIENT)
+def _is_transient(e: LLMError) -> bool:
+    """An HTTP failure is judged by its status code. Matching "500" anywhere in the message used to
+    retry a permanent `400 prompt is 41500 tokens` six times — a minute of backoff per call — and
+    since the message carries the model id and the body, any digits in either could trigger it.
+    Only an error frame inside a 200 stream has no status, so only there do its words decide."""
+    if e.status is not None:
+        return e.status in _RETRY_STATUS
+    d = e.detail.lower()
+    return any(t in d for t in _TRANSIENT_TEXT)
+
+
+def _is_rate_limit(e: LLMError) -> bool:
+    return e.status == 429 or any(t in e.detail.lower() for t in ("concurrent", "rate limit"))
 
 
 def _tidy(msg: str) -> str:
@@ -125,9 +141,11 @@ async def chat(
     mode = config.RESEARCH_MODE
 
     if mode in ("auto", "replay"):
-        hit = cache.get("chat", req)
+        # sqlite off the loop — a locked cache must stall this call, not every run (cache.py).
+        hit = await asyncio.to_thread(cache.get, "chat", req)
         if hit is None and mode == "replay":
-            hit = cache.get_any_model("chat", req)   # recorded under a model since swapped out
+            # recorded under a model since swapped out
+            hit = await asyncio.to_thread(cache.get_any_model, "chat", req)
         if hit is not None:
             async for ev in _replay(hit):
                 yield ev
@@ -140,8 +158,10 @@ async def chat(
         if ev.get("type") == "done":
             final = ev
         yield ev
-    if final is not None:
-        cache.put("chat", req, final)
+    # Record only a turn that said something. An empty turn (thinking with no answer, a stream
+    # cut short) is a failure, and recorded it would replay as that failure on every later run.
+    if final is not None and (final.get("content") or final.get("calls")):
+        await asyncio.to_thread(cache.put, "chat", req, final)
 
 
 async def _chat_retry(model, messages, tools, num_ctx, temperature, timeout):
@@ -158,13 +178,13 @@ async def _chat_retry(model, messages, tools, num_ctx, temperature, timeout):
         except LLMError as e:
             # LLMError is already raised as "{model}: ...", so never prefix the model again here —
             # that produced "kimi-k2.6:cloud: kimi-k2.6:cloud: HTTP 429: ...".
-            if emitted or not _is_transient(str(e)) or attempt == attempts - 1:
+            if emitted or not _is_transient(e) or attempt == attempts - 1:
                 runcfg.report("provider", _tidy(str(e)))
                 raise
             delay = min(30.0, 2.0 * 2**attempt)
             # A 429 is about the whole process, not this one call: back every caller off together,
             # or five more calls immediately retry into the same wall.
-            if "429" in str(e) or "concurrent" in str(e).lower():
+            if _is_rate_limit(e):
                 _hold_off(delay)
             # Say it out loud. Silently sleeping 32s is why the run looked wedged.
             runcfg.report("provider", f"{_tidy(str(e))} — retry {attempt + 1}/{attempts} in {delay:.0f}s")
@@ -216,7 +236,8 @@ async def _chat_stream(model, messages, tools, num_ctx, temperature, timeout):
         async with client.stream("POST", f"{base}/api/chat", json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = (await resp.aread()).decode(errors="replace")[:400]
-                raise LLMError(f"{model}: HTTP {resp.status_code}: {body}")
+                raise LLMError(f"{model}: HTTP {resp.status_code}: {body}",
+                               status=resp.status_code, detail=body)
             async for line in resp.aiter_lines():
                 line = line.strip()
                 if not line:
@@ -226,7 +247,7 @@ async def _chat_stream(model, messages, tools, num_ctx, temperature, timeout):
                 except json.JSONDecodeError:
                     continue
                 if "error" in chunk:
-                    raise LLMError(f"{model}: {chunk['error']}")
+                    raise LLMError(f"{model}: {chunk['error']}", detail=str(chunk["error"]))
                 msg = chunk.get("message") or {}
                 if msg.get("thinking"):
                     thinking += msg["thinking"]
@@ -278,7 +299,8 @@ async def embeddings(model: str, texts: list[str], timeout: float = 120.0) -> li
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
             resp = await client.post(f"{base}/api/embed", json=payload, headers=headers)
             if resp.status_code != 200:
-                raise LLMError(f"{model}: HTTP {resp.status_code}: {resp.text[:300]}")
+                raise LLMError(f"{model}: HTTP {resp.status_code}: {resp.text[:300]}",
+                               status=resp.status_code, detail=resp.text[:300])
             data = resp.json()
     embs = data.get("embeddings")
     if not embs or len(embs) != len(texts):

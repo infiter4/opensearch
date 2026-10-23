@@ -45,7 +45,7 @@ async def plan(question: str, n: int, red_team: bool = False,
 
     subtasks: list[dict] = []
     if isinstance(raw, list):
-        for i, t in enumerate(raw[:n], 1):
+        for t in raw[:n]:
             if not isinstance(t, dict):
                 continue
             sub = str(t.get("subquery") or "").strip()
@@ -53,7 +53,10 @@ async def plan(question: str, n: int, red_team: bool = False,
                 continue
             lane = str(t.get("lane") or "web").lower().strip()
             subtasks.append({
-                "agent_id": f"a{i}",
+                # Numbered by what was KEPT, not by position in the raw list: a skipped entry left
+                # a1, a3, a4, and the red team below (a{len+1}) became a second "a4" — two agents
+                # sharing sentence ids, claim ids and a column.
+                "agent_id": f"a{len(subtasks) + 1}",
                 "title": str(t.get("title") or sub)[:60],
                 "subquery": sub,
                 "lane": lane if lane in _VALID_LANES else "web",

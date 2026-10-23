@@ -39,6 +39,14 @@ async def _race_cancel(coro: Awaitable[Any], cancel: asyncio.Event) -> Any:
         waiter.cancel()
         with contextlib.suppress(BaseException):
             await waiter
+        # Stop, GC and the run deadline all set the event AND cancel the run's task, and the task
+        # cancel lands first — in asyncio.wait above, which never cancels what it waits on. Without
+        # this the in-flight turn was orphaned: it kept streaming, retrying and holding an
+        # _INFLIGHT slot after the UI said "cancelled", starving the next run.
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
 
 
 async def run_agent(spec: AgentSpec, ctx: Ctx, prompt: str, system_extra: str = "") -> str:

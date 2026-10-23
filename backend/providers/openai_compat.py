@@ -39,7 +39,16 @@ ENDPOINTS: dict[str, tuple[str, str]] = {
 
 
 class LLMError(RuntimeError):
-    pass
+    """`status` is the HTTP status when there was one — the only thing _retry classifies on."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+# A Groq 400 reading "...9500 tokens requested" matched "500" and burned five attempts; the status
+# code is the provider's own verdict on whether a retry can help, so that is what's read.
+_RETRY_STATUS = {408, 429, 500, 502, 503, 504}
 
 
 def is_compat(model: str) -> bool:
@@ -119,9 +128,9 @@ async def chat(
            "num_ctx": num_ctx, "temperature": temperature}
     mode = config.RESEARCH_MODE
     if mode in ("auto", "replay"):
-        hit = cache.get("chat", req)
+        hit = await asyncio.to_thread(cache.get, "chat", req)    # sqlite off the loop (cache.py)
         if hit is None and mode == "replay":
-            hit = cache.get_any_model("chat", req)
+            hit = await asyncio.to_thread(cache.get_any_model, "chat", req)
         if hit is not None:
             from .ollama import _replay
             async for ev in _replay(hit):
@@ -135,8 +144,9 @@ async def chat(
         if ev.get("type") == "done":
             final = ev
         yield ev
-    if final:
-        cache.put("chat", req, final)
+    # An empty turn is a failure; recorded, it would replay as one forever (see ollama.chat).
+    if final and (final.get("content") or final.get("calls")):
+        await asyncio.to_thread(cache.put, "chat", req, final)
 
 
 async def _retry(model, messages, tools, temperature, timeout):
@@ -148,8 +158,7 @@ async def _retry(model, messages, tools, temperature, timeout):
                 yield ev
             return
         except LLMError as e:
-            s = str(e).lower()
-            transient = any(t in s for t in ("429", "500", "502", "503", "504", "overload", "timeout"))
+            transient = e.status in _RETRY_STATUS
             if emitted or not transient or attempt == 4:
                 runcfg.report("provider", f"{model}: {str(e)[:160]}")
                 raise
@@ -181,7 +190,8 @@ async def embeddings(model: str, texts: list[str], timeout: float = 120.0) -> li
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         )
         if resp.status_code != 200:
-            raise LLMError(f"{model}: HTTP {resp.status_code}: {resp.text[:300]}")
+            raise LLMError(f"{model}: HTTP {resp.status_code}: {resp.text[:300]}",
+                           status=resp.status_code)
         data = resp.json()
     rows = sorted(data.get("data", []), key=lambda d: d.get("index", 0))
     return [d["embedding"] for d in rows]
@@ -217,7 +227,7 @@ async def _once(model, messages, tools, temperature, timeout):
         ) as resp:
             if resp.status_code != 200:
                 body = (await resp.aread()).decode(errors="replace")[:300]
-                raise LLMError(f"{model}: HTTP {resp.status_code}: {body}")
+                raise LLMError(f"{model}: HTTP {resp.status_code}: {body}", status=resp.status_code)
             async for line in resp.aiter_lines():
                 line = line.strip()
                 if not line.startswith("data:"):

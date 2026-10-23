@@ -9,7 +9,9 @@ Two jobs, and the second one is a landmine:
 
 2. data/cache.sqlite is COMMITTED. The request payload carries API keys. Redaction happens before
    hashing AND before storing — one function, both paths — or the repo leaks the user's keys.
-   Redacting before hashing also means rotating a key doesn't bust the cache.
+   Redacting before hashing also means rotating a key doesn't bust the cache. It runs on the
+   stored RESPONSE too, and it matches secret VALUES, not just secret-looking dict keys: a key
+   printed by a sandbox `env` rides into the next turn's messages as plain text.
 
 3. Swapping a model must not strand a recording. The exact key includes the model, so `auto`
    really does call a newly configured model. `replay` falls back to the same request recorded
@@ -17,19 +19,29 @@ Two jobs, and the second one is a landmine:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
 from typing import Any, Awaitable, Callable
 
 from .. import config
+from . import runcfg
 
 _SECRET_KEYS = {
     "api_key", "apikey", "api-key", "authorization", "auth", "bearer",
     "key", "keys", "token", "access_token", "secret", "password",
 }
+
+# Provider key shapes, for a key this process was never told about (pasted into a question, read
+# off a page). OpenAI-style `sk-` must contain a digit so "sk-learn-style-prose" survives.
+_KEY_SHAPES = re.compile(
+    r"\b(?:sk-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,}"
+    r"|AIza[0-9A-Za-z_-]{30,}|tvly-[A-Za-z0-9_-]{8,})"
+)
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -39,21 +51,35 @@ class CacheMiss(RuntimeError):
     """Raised in replay mode when a call was never recorded."""
 
 
-def _redact(obj: Any) -> Any:
+def scrub_text(s: str, secrets: set[str] | None = None) -> str:
+    """Strip known secret values and key-shaped tokens out of free text."""
+    if secrets is None:
+        secrets = runcfg.secret_values()
+    for v in sorted(secrets, key=len, reverse=True):   # a DB URL before the password inside it
+        if v in s:
+            s = s.replace(v, "<redacted>")
+    return _KEY_SHAPES.sub("<redacted>", s)
+
+
+def _redact(obj: Any, secrets: set[str] | None = None) -> Any:
     """Recursively strip secrets. Keys arrive nested ({"keys": {"ollama": "..."}}), so a flat
     scrub silently misses them — which is exactly how a key ends up committed."""
+    if secrets is None:
+        secrets = runcfg.secret_values()
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
             if str(k).lower() in _SECRET_KEYS:
                 out[k] = "<redacted>"
             else:
-                out[k] = _redact(v)
+                out[k] = _redact(v, secrets)
         return out
     if isinstance(obj, (list, tuple)):
-        return [_redact(v) for v in obj]
-    if isinstance(obj, str) and (obj.startswith("Bearer ") or obj.startswith("tvly-")):
-        return "<redacted>"
+        return [_redact(v, secrets) for v in obj]
+    if isinstance(obj, str):
+        if obj.startswith("Bearer ") or obj.startswith("tvly-"):
+            return "<redacted>"
+        return scrub_text(obj, secrets)
     return obj
 
 
@@ -102,9 +128,10 @@ def _db() -> sqlite3.Connection:
         _restore_from_archive()
         _conn = sqlite3.connect(config.CACHE_DB, check_same_thread=False, timeout=15.0)
         _conn.execute("PRAGMA journal_mode=WAL")
-        # The module _lock only serialises writers INSIDE this process, and asyncio is
-        # single-threaded so it barely contends at all. The real contention is across PROCESSES:
-        # a warm script, a second uvicorn worker, or two browser tabs all write this file.
+        # The module _lock only serialises access INSIDE this process (the async call sites run
+        # get/put in worker threads, all sharing this one connection). The real contention is
+        # across PROCESSES: a warm script, a second uvicorn worker, or two browser tabs all write
+        # this file.
         # Observed: "OperationalError: database is locked" killed a run at the lead stage.
         # busy_timeout makes a blocked writer WAIT rather than fail instantly.
         _conn.execute("PRAGMA busy_timeout=15000")
@@ -122,10 +149,16 @@ def _db() -> sqlite3.Connection:
         cols = {r[1] for r in _conn.execute("PRAGMA table_info(cache)")}
         if "any_model_key" not in cols:
             # A cache recorded before model-agnostic replay. Without the column every put() would
-            # fail — and put() swallows errors, so nothing would be recorded, silently. Old rows
-            # are NOT backfilled (re-hashing a big cache stalls startup ~100s); they keep replaying
-            # by exact model, and everything recorded from here on replays under any model.
+            # fail — and put() swallows errors, so nothing would be recorded, silently. Backfill it
+            # from the stored request (already the redacted canonical form), once: measured at
+            # ~2s for a full 2,400-row demo cache, and it lets old recordings survive a model
+            # swap too.
             _conn.execute("ALTER TABLE cache ADD COLUMN any_model_key TEXT")
+            rows = _conn.execute("SELECT key, kind, request FROM cache").fetchall()
+            _conn.executemany(
+                "UPDATE cache SET any_model_key=? WHERE key=?",
+                [(any_model_key(kind, json.loads(req)), key) for key, kind, req in rows],
+            )
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_kind ON cache(kind)")
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_any_model ON cache(any_model_key)")
         _conn.commit()
@@ -152,7 +185,7 @@ def get_any_model(kind: str, req: Any) -> Any | None:
 
 def put(kind: str, req: Any, resp: Any) -> None:
     k = cache_key(kind, req)
-    row = (k, kind, canonical(req), json.dumps(resp, default=str), time.time(),
+    row = (k, kind, canonical(req), json.dumps(_redact(resp), default=str), time.time(),
            any_model_key(kind, req))
     with _lock:
         for attempt in range(4):
@@ -181,8 +214,11 @@ async def cached_call(
     """Wrap EVERY egress call. `fn` must be a zero-arg coroutine returning JSON-able data."""
     mode = mode or config.RESEARCH_MODE
 
+    # sqlite runs in a worker thread, never on the loop: while another process holds the write
+    # lock a call WAITS (busy_timeout, up to ~60s across put's retries), and on the loop that wait
+    # froze every run and every SSE stream at once — heartbeats included.
     if mode in ("auto", "replay"):
-        hit = get(kind, req)
+        hit = await asyncio.to_thread(get, kind, req)
         if hit is not None:
             return hit
         if mode == "replay":
@@ -192,7 +228,7 @@ async def cached_call(
             )
 
     resp = await fn()
-    put(kind, req, resp)
+    await asyncio.to_thread(put, kind, req, resp)
     return resp
 
 

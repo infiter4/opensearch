@@ -98,11 +98,17 @@ def find_quote(source: str, quote: str) -> tuple[int, int] | None:
 
     Returns raw offsets into `source` so the UI can highlight the real span.
     """
+    hit = _locate(source, quote)
+    return hit[:2] if hit else None
+
+
+def _locate(source: str, quote: str) -> tuple[int, int, bool] | None:
+    """find_quote, plus whether the WHOLE quote was found (False: only its 40-char prefix was)."""
     if not quote:
         return None
     i = source.find(quote)
     if i != -1:
-        return i, i + len(quote)
+        return i, i + len(quote), True
 
     nq = _norm(quote)
     if not nq:
@@ -132,14 +138,15 @@ def find_quote(source: str, quote: str) -> tuple[int, int] | None:
     ns = "".join(buf)
     j = ns.find(nq)
     if j == -1:
-        # last resort: the model dropped or added a trailing clause. Anchor on a long prefix.
+        # last resort: the model dropped or added a trailing clause. Anchor on a long prefix —
+        # good enough to HIGHLIGHT where it was looking, never enough to count as support.
         if len(nq) >= 40:
             j = ns.find(nq[:40])
             if j == -1:
                 return None
-            return raw_idx[j], raw_idx[min(j + 40 - 1, len(raw_idx) - 1)] + 1
+            return raw_idx[j], raw_idx[min(j + 40 - 1, len(raw_idx) - 1)] + 1, False
         return None
-    return raw_idx[j], raw_idx[min(j + len(nq) - 1, len(raw_idx) - 1)] + 1
+    return raw_idx[j], raw_idx[min(j + len(nq) - 1, len(raw_idx) - 1)] + 1, True
 
 
 async def verify_pair(claim_text: str, source_text: str) -> Verdict:
@@ -168,14 +175,19 @@ async def verify_pair(claim_text: str, source_text: str) -> Verdict:
     verdict = str(d.get("verdict", "")).lower().strip()
     if verdict not in ("supported", "weak", "unsupported", "contradicted"):
         verdict = "weak"
-    quote = (d.get("quote") or "").strip() or None
+    q = d.get("quote")
+    if isinstance(q, list):
+        # Several spans returned as an array. Any one literal span is evidence; take the first.
+        q = next((x for x in q if isinstance(x, str) and x.strip()), "")
+    quote = (q if isinstance(q, str) else str(q or "")).strip() or None
     reason = str(d.get("reason") or "")[:240]
     try:
         conf = max(0.0, min(1.0, float(d.get("confidence", 0.5))))
     except (TypeError, ValueError):
         conf = 0.5
 
-    span = find_quote(source_text, quote) if quote else None
+    hit = _locate(source_text, quote) if quote else None
+    span = hit[:2] if hit else None
     downgraded = False
 
     # THE ENFORCEMENT. A claimed quote that is not literally in the source is not evidence.
@@ -184,6 +196,14 @@ async def verify_pair(claim_text: str, source_text: str) -> Verdict:
         downgraded = True
         reason = "quote not found in source" + (f" — model said: {reason}" if reason else "")
         quote = None
+    elif verdict in ("supported", "contradicted") and not hit[2]:
+        # Only the first 40 characters are really there. A real opening plus an invented tail
+        # ("…1,000 credits per month and unlimited searches") must not pass as support. Keep the
+        # span so the drawer shows where it was looking, and quote only the text that IS there.
+        verdict = "weak"
+        downgraded = True
+        reason = "quote only partly found in source" + (f" — model said: {reason}" if reason else "")
+        quote = source_text[span[0]:span[1]]
 
     return Verdict(
         verdict=verdict,
@@ -218,7 +238,13 @@ async def verify_all(pairs: list[tuple[str, str, str, int]], reg) -> dict[tuple[
                 "unsupported", None, None, None, 0.0, "source body unavailable"
             )
         async with sem:
-            return (claim_id, source_id), await verify_pair(claim_text, body)
+            try:
+                v = await verify_pair(claim_text, body)
+            except Exception as e:
+                # A crash must still produce a verdict. Dropped by the gather below, the claim had
+                # no cell at all: invisible to the trust score, never repaired, "checking" forever.
+                v = Verdict("weak", None, None, None, 0.0, f"verifier error: {type(e).__name__}")
+            return (claim_id, source_id), v
 
     out = await asyncio.gather(*(one(*p) for p in pairs), return_exceptions=True)
     return {k: v for r in out if not isinstance(r, BaseException) for k, v in [r]}

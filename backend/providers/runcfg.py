@@ -7,6 +7,8 @@ before hashing), and never echoed back out in events.
 """
 from __future__ import annotations
 
+import os
+import re
 from contextvars import ContextVar
 from typing import Callable
 
@@ -53,3 +55,25 @@ def effective_models() -> dict[str, str]:
 def key_for(provider: str) -> str | None:
     """BYOK key for 'ollama' | 'groq' | 'openrouter' | 'google'. None -> caller falls back to env."""
     return _keys.get().get(provider)
+
+
+# Env vars that hold a credential, by name. A DB URL is matched by its VALUE instead: it carries
+# the password inline whatever the variable happens to be called.
+_SECRET_ENV = re.compile(r"(_KEY|_TOKEN|_SECRET|_PASSWORD)$", re.I)
+_URL_CREDS = re.compile(r"^[a-z][a-z0-9+.-]*://[^/\s:@]+:([^@\s]+)@", re.I)
+
+
+def secret_values() -> set[str]:
+    """Every credential value this process could leak right now: the run's BYOK keys, plus env
+    vars that hold one. Redaction by key NAME misses a key that has left its dict — a tool's
+    stdout after `env`, a page that echoes a header — so cache.py and tool output also scrub
+    these by VALUE. Short values are skipped: scrubbing "1" would shred every number in a prompt."""
+    vals = set(_keys.get().values())
+    for name, v in os.environ.items():
+        m = _URL_CREDS.match(v)
+        if m:
+            vals.update((v, m.group(1)))
+        elif _SECRET_ENV.search(name):
+            vals.add(v)
+    out = {v.strip().strip("\"'") for v in vals if v}
+    return {v for v in out if len(v) >= 8}

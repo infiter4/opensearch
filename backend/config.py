@@ -1,7 +1,9 @@
 """Config + search-mode presets. No network, no imports from the rest of the app."""
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -21,7 +23,23 @@ def _load_env(path: Path = ROOT / ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, _, v = line.partition("=")
-        os.environ.setdefault(k.strip(), v.strip())
+        os.environ.setdefault(k.strip(), _env_value(v))
+
+
+def _env_value(v: str) -> str:
+    """`KEY=auto   # note` -> "auto", `KEY="a # b"` -> "a # b", `KEY=pa#ss` -> "pa#ss".
+
+    The README's own config block carries inline comments. Kept verbatim they became the value:
+    RESEARCH_MODE="auto   # live | auto | replay" matched no mode, so every call silently went
+    LIVE (paid, cache never read), and `OLLAMA_API_KEY=   # required` sent the comment as a key.
+    Only a `#` after whitespace starts a comment, so a `#` inside a password survives.
+    """
+    v = v.strip()
+    if v[:1] in ("'", '"'):
+        end = v.find(v[0], 1)
+        if end != -1:
+            return v[1:end]
+    return re.sub(r"(?:^|\s)#.*$", "", v).strip()
 
 
 _load_env()
@@ -30,7 +48,19 @@ OLLAMA_CLOUD_URL = "https://ollama.com"
 OLLAMA_LOCAL_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 
 Mode = Literal["live", "auto", "replay"]
-RESEARCH_MODE: Mode = os.environ.get("RESEARCH_MODE", "auto")  # type: ignore[assignment]
+
+
+def _research_mode(raw: str) -> Mode:
+    """An unknown mode used to fall through every `mode in ("auto", "replay")` check — i.e. run
+    live, paying for every call, without a word. Say so, and take the dev default."""
+    if raw in ("live", "auto", "replay"):
+        return raw  # type: ignore[return-value]
+    logging.getLogger("receipts").warning(
+        "RESEARCH_MODE=%r is not one of live|auto|replay; using auto", raw)
+    return "auto"
+
+
+RESEARCH_MODE: Mode = _research_mode(os.environ.get("RESEARCH_MODE", "auto"))
 
 # ── Graph-RAG / workspaces (all OPTIONAL; absent SUPABASE_DB_URL => feature disabled) ──
 # The DSN is a server secret: .env only, never posted from the browser, never passed to cache.py.

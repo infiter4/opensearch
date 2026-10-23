@@ -12,8 +12,17 @@ from ..providers import rrf
 from ..store import chunks as chunks_store
 from .tools import Ctx, obj, tool
 
-# url -> (title, body, locator), stashed by corpus_search so corpus_read skips a DB round-trip.
-_BODIES: dict[str, tuple[str, str, str | None]] = {}
+# (workspace_id, url) -> (title, body, locator), stashed by corpus_search so corpus_read skips a
+# DB round-trip. Keyed by workspace: keyed by url alone, a hit skipped by_url's workspace filter, so
+# a run could read another workspace's passage — or one already deleted. Capped, oldest out first.
+_BODIES: dict[tuple[str | None, str], tuple[str, str, str | None]] = {}
+_BODIES_MAX = 2048
+
+
+def _stash(key: tuple[str | None, str], hit: tuple[str, str, str | None]) -> None:
+    _BODIES[key] = hit
+    while len(_BODIES) > _BODIES_MAX:
+        _BODIES.pop(next(iter(_BODIES)))
 
 
 @tool(
@@ -38,7 +47,8 @@ async def corpus_search(args: dict, ctx: Ctx) -> str:
     out = []
     for i, h in enumerate(hits, 1):
         url = rrf.normalize_url(h["url"])
-        _BODIES[url] = (h.get("title") or "", h.get("body") or "", h.get("locator"))
+        _stash((ctx.workspace_id, url),
+               (h.get("title") or "", h.get("body") or "", h.get("locator")))
         corro = f"  [found by {'+'.join(h['_lanes'])}]" if len(h.get("_lanes", [])) > 1 else ""
         loc = f" ({h['locator']})" if h.get("locator") else ""
         snippet = (h.get("body") or "")[:200].replace("\n", " ")
@@ -60,7 +70,7 @@ async def corpus_read(args: dict, ctx: Ctx) -> str:
         return "ERROR: no source registry"
     norm = rrf.normalize_url(url)
 
-    hit = _BODIES.get(norm)
+    hit = _BODIES.get((ctx.workspace_id, norm))
     if hit is not None:
         title, body, locator = hit
     else:

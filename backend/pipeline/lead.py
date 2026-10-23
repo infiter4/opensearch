@@ -15,11 +15,17 @@ at the last step. Two structural constraints (code, not prompts) make the merge 
 """
 from __future__ import annotations
 
+import re
+
 from .. import config
 from ..providers import llm
 from ..runtime.registry import spec
 from . import claims as claims_mod
 from . import renumber, segment, verify
+
+# The gaps section the lead prompt asks for, up to the next heading (or the end).
+_GAPS_HEAD = re.compile(r"^[ \t]*(?:#{1,6}[ \t]*|\*\*)what we could not establish\b.*$", re.I | re.M)
+_NEXT_HEAD = re.compile(r"^[ \t]*#{1,6}[ \t]", re.M)
 
 
 def _findings(reports: list[dict]) -> str:
@@ -40,8 +46,27 @@ def gaps_from(reports: list[dict], retracted: list[dict]) -> list[str]:
         if r.get("failed"):
             out.append(f"{r['title']}: no usable findings ({r.get('why', 'agent failed')[:80]})")
     for x in retracted:
-        out.append(f"{x['text'][:110]} — {x['reason'][:80]}")
+        # Without its markers: a gap handed over as "X [2]" came back in the answer as a cited
+        # sentence, was verified again, failed again, and was retracted out of the very section
+        # that exists to report it.
+        out.append(f"{renumber.strip(x['text'])[:110]} — {x['reason'][:80]}")
     return out
+
+
+def _uncite_gaps(text: str) -> str:
+    """Strip citation markers from the "What we could not establish" section.
+
+    That section reports verification FAILURES. It is not a claim, so it must not become a claim
+    candidate: the lead attaches markers there on its own ("…did not render in the fetch [2]"),
+    and each one was extracted, checked, failed and rewritten or retracted — so the honest list
+    shrank exactly where it was supposed to be complete.
+    """
+    m = _GAPS_HEAD.search(text)
+    if not m:
+        return text
+    nxt = _NEXT_HEAD.search(text, m.end())
+    end = nxt.start() if nxt else len(text)
+    return text[:m.end()] + renumber.strip(text[m.end():end]) + text[end:]
 
 
 async def merge(question: str, reports: list[dict], reg, gaps: list[str], emit) -> dict:
@@ -81,6 +106,7 @@ async def merge(question: str, reports: list[dict], reg, gaps: list[str], emit) 
             "scope": "lead",
             "message": f"lead invented {len(orphans)} citation marker(s), removed: {orphans}",
         })
+    text = _uncite_gaps(text)
 
     sents = segment.segment(text, prefix="lead.s")
     emit("agent_answer", {

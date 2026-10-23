@@ -102,7 +102,8 @@ def test_a_cache_from_before_the_column_is_migrated(monkeypatch, tmp_path):
     conn.close()
 
     _fresh_cache(monkeypatch, tmp_path)
-    assert cache.get("chat", req) == {"content": "old"}            # old rows replay exactly
+    assert cache.get("chat", req) == {"content": "old"}            # old rows replay exactly...
+    assert cache.get_any_model("chat", {**req, "model": "new:cloud"}) == {"content": "old"}  # ...and under any model
     new = {"model": "x:cloud", "messages": []}
-    cache.put("chat", new, {"content": "new"})                    # writes still land...
+    cache.put("chat", new, {"content": "new"})                    # writes still land
     assert cache.get_any_model("chat", {**new, "model": "y:cloud"}) == {"content": "new"}

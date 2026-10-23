@@ -65,7 +65,11 @@ async def complete_json(model: str, messages: list[dict], **kw) -> Any:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        for opener, closer in (("[", "]"), ("{", "}")):
+        # Try the bracket that OPENS first. A fixed "[" then "{" order turned
+        # `Here: {"claims": ["a", "b"]} done` into the inner list ["a", "b"], not the object.
+        pairs = sorted((("[", "]"), ("{", "}")),
+                       key=lambda p: raw.find(p[0]) if p[0] in raw else len(raw))
+        for opener, closer in pairs:
             i, j = raw.find(opener), raw.rfind(closer)
             if i != -1 and j > i:
                 try:

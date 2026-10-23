@@ -12,6 +12,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from ..providers import cache
+
 if TYPE_CHECKING:
     from ..pipeline.sources import SourceRegistry
 
@@ -78,11 +80,15 @@ async def dispatch(name: str, args: dict, ctx: Ctx) -> Any:
     if not t:
         return f"ERROR: unknown tool '{name}'"
     try:
-        return await t.handler(args or {}, ctx)
+        out = await t.handler(args or {}, ctx)
     except (Cancelled, StepBudgetReached, asyncio.CancelledError):
         raise
     except Exception as e:  # ordinary tool errors are information the model can act on, not crashes
-        return f"ERROR: {type(e).__name__}: {e}"
+        out = f"ERROR: {type(e).__name__}: {e}"
+    # Tool output goes to the model, the SSE stream, and — inside the next turn's messages — the
+    # committed cache. A credential that reached it (`env`, `cat .env`, a page echoing a header)
+    # stops here, by value.
+    return cache.scrub_text(out) if isinstance(out, str) else out
 
 
 def obj(props: dict, required: list[str] | None = None) -> dict:

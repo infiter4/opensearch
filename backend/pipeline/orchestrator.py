@@ -125,11 +125,16 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
             if not any(c["verdict"] in ("unsupported", "contradicted") for c in cells_):
                 return []
             emit("agent_status", {"agent_id": r["agent_id"], "status": "rewriting"})
-            text, sents, cl, retr = await rewrite.repair(
-                r["agent_id"], r["text"], reg, cells_, preset.rewrite_iters, emit
-            )
-            r.update(text=text, sentences=sents, claims=cl, iteration=1)
-            r["verdicts"] = await _reverify(cl, reg)
+            try:
+                text, sents, cl, retr = await rewrite.repair(
+                    r["agent_id"], r["text"], reg, cells_, preset.rewrite_iters, emit
+                )
+                r.update(text=text, sentences=sents, claims=cl, iteration=1)
+                r["verdicts"] = await _reverify(cl, reg)
+            finally:
+                # "rewriting" is the last status this agent's card saw; the lead gets its "done"
+                # below, and without this a repaired researcher said "rewriting" forever.
+                emit("agent_status", {"agent_id": r["agent_id"], "status": "done"})
             return retr
 
         repaired = await asyncio.gather(*(_repair(r) for r in reports), return_exceptions=True)
@@ -169,7 +174,7 @@ async def run(question: str, mode: str = "pro", cancel: asyncio.Event | None = N
                     ld.update(text=text, sentences=sents, claims=cl, iteration=1)
                     ld["verdicts"] = await _reverify(cl, reg)
                     all_retracted += retr
-                    gaps += [f"{x['text'][:110]} — {x['reason'][:80]}" for x in retr]
+                    gaps += lead_mod.gaps_from([], retr)
                 except Exception as e:
                     emit("error", {"scope": "lead", "message": f"lead repair failed: {e}"})
         emit("agent_status", {"agent_id": "lead", "status": "done"})
