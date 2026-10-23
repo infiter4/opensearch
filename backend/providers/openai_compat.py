@@ -120,6 +120,8 @@ async def chat(
     mode = config.RESEARCH_MODE
     if mode in ("auto", "replay"):
         hit = cache.get("chat", req)
+        if hit is None and mode == "replay":
+            hit = cache.get_any_model("chat", req)
         if hit is not None:
             from .ollama import _replay
             async for ev in _replay(hit):

@@ -308,7 +308,8 @@ retrying into the same wall.
 content-addressed and recorded in a committed SQLite DB.
 
 - `auto` — read-through, records on miss. **dev default**
-- `replay` — cache only, hard error on miss. **demo default**
+- `replay` — cache only, hard error on miss. **demo default**. If a turn was recorded under a
+  different model, it replays that recording — swapping a model in config doesn't strand the demo.
 
 A deep run costs ~100 external calls against a free tier whose limits are unpublished. Warm it,
 commit the cache, and rehearse **with the wifi physically off**. Secrets are redacted **before
@@ -433,6 +434,7 @@ web/src/
 - `test_report_tools` — the sandbox: writes stay inside the workspace; timeouts reap the process group; `run_shell` does real filesystem work.
 - `test_router` — research vs task classification (incl. the polite-request cases) + auto-depth.
 - `test_embeddings` — the facade routes by model id and caches like chat (replay-safe).
+- `test_cache` — replay survives a model swap; `auto` still calls the new model; old caches migrate.
 - `test_store` — the feature flag; DSN scrubbing; slug hygiene.
 - `test_chunk` — chunk offsets round-trip; PDF/code locators are correct.
 

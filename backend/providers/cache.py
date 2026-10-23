@@ -10,6 +10,10 @@ Two jobs, and the second one is a landmine:
 2. data/cache.sqlite is COMMITTED. The request payload carries API keys. Redaction happens before
    hashing AND before storing — one function, both paths — or the repo leaks the user's keys.
    Redacting before hashing also means rotating a key doesn't bust the cache.
+
+3. Swapping a model must not strand a recording. The exact key includes the model, so `auto`
+   really does call a newly configured model. `replay` falls back to the same request recorded
+   under ANY model — change the writer in config and the recorded demo still plays.
 """
 from __future__ import annotations
 
@@ -61,6 +65,13 @@ def cache_key(kind: str, req: Any) -> str:
     return hashlib.sha256(f"{kind}\x00{canonical(req)}".encode()).hexdigest()
 
 
+def any_model_key(kind: str, req: Any) -> str:
+    """The same request with the model left out — what replay falls back to after a model swap."""
+    if isinstance(req, dict):
+        req = {k: v for k, v in req.items() if k != "model"}
+    return cache_key(f"{kind}:any-model", req)
+
+
 def _restore_from_archive() -> None:
     """Unpack data/cache.sqlite.gz on first use.
 
@@ -104,10 +115,19 @@ def _db() -> sqlite3.Connection:
                    kind       TEXT NOT NULL,
                    request    TEXT NOT NULL,
                    response   TEXT NOT NULL,
-                   created_at REAL NOT NULL
+                   created_at REAL NOT NULL,
+                   any_model_key TEXT
                )"""
         )
+        cols = {r[1] for r in _conn.execute("PRAGMA table_info(cache)")}
+        if "any_model_key" not in cols:
+            # A cache recorded before model-agnostic replay. Without the column every put() would
+            # fail — and put() swallows errors, so nothing would be recorded, silently. Old rows
+            # are NOT backfilled (re-hashing a big cache stalls startup ~100s); they keep replaying
+            # by exact model, and everything recorded from here on replays under any model.
+            _conn.execute("ALTER TABLE cache ADD COLUMN any_model_key TEXT")
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_kind ON cache(kind)")
+        _conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_any_model ON cache(any_model_key)")
         _conn.commit()
     return _conn
 
@@ -119,15 +139,27 @@ def get(kind: str, req: Any) -> Any | None:
     return json.loads(row[0]) if row else None
 
 
+def get_any_model(kind: str, req: Any) -> Any | None:
+    """Replay's fallback: the same request recorded under any model, newest recording first."""
+    k = any_model_key(kind, req)
+    with _lock:
+        row = _db().execute(
+            "SELECT response FROM cache WHERE any_model_key=? ORDER BY created_at DESC LIMIT 1",
+            (k,),
+        ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
 def put(kind: str, req: Any, resp: Any) -> None:
     k = cache_key(kind, req)
-    row = (k, kind, canonical(req), json.dumps(resp, default=str), time.time())
+    row = (k, kind, canonical(req), json.dumps(resp, default=str), time.time(),
+           any_model_key(kind, req))
     with _lock:
         for attempt in range(4):
             try:
                 _db().execute(
-                    "INSERT OR REPLACE INTO cache(key,kind,request,response,created_at) "
-                    "VALUES(?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO cache(key,kind,request,response,created_at,"
+                    "any_model_key) VALUES(?,?,?,?,?,?)",
                     row,
                 )
                 _db().commit()

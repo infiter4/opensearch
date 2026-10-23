@@ -126,6 +126,8 @@ async def chat(
 
     if mode in ("auto", "replay"):
         hit = cache.get("chat", req)
+        if hit is None and mode == "replay":
+            hit = cache.get_any_model("chat", req)   # recorded under a model since swapped out
         if hit is not None:
             async for ev in _replay(hit):
                 yield ev
