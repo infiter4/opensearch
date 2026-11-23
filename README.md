@@ -1,4 +1,4 @@
-# receipts
+# opensearch
 
 **Everyone else cites. This verifies.**
 
