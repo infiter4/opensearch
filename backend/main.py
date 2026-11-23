@@ -14,7 +14,7 @@ from .providers import cache
 from .routers import research, workspace
 from .store import db as store_db
 
-app = FastAPI(title="receipts", version="0.1")
+app = FastAPI(title="opensearch", version="0.1")
 
 ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 

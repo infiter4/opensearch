@@ -11,11 +11,7 @@ graphify-out/
 .pytest_cache/
 .DS_Store
 
-# The warmed cache IS the demo insurance, so it ships with the repo — but as cache.sqlite.gz.
-# The raw db is 117MB (mostly free pages; 62MB of real rows) and GitHub's hard limit is 100MB;
-# gzipped it is 27MB. cache.py inflates the archive on first use, so `git clone && run` replays
-# the demo offline with no build step.
-# cache.py redacts secrets before hashing and before storing; see backend/providers/cache.py
+# Local record/replay cache (RESEARCH_MODE=auto|replay) — never commit it
 data/cache.sqlite
 data/cache.sqlite-wal
 data/cache.sqlite-shm

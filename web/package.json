@@ -1,5 +1,5 @@
 {
-  "name": "receipts-web",
+  "name": "opensearch-web",
   "private": true,
   "type": "module",
   "scripts": {

@@ -123,8 +123,8 @@ class ModePreset:
     report: bool
 
 
-# One knob on everything. Lite exists so the LIVE demo is fast and real;
-# Deep is the showpiece and runs from cache on stage.
+# One knob on everything. Lite is the fast, cheap default for simple questions;
+# Deep is the full audit: red team, provenance graph and an HTML report.
 # max_steps is an ACTION budget, and the floor is not arbitrary: search(1) + read(1) + write(1) = 3
 # is the bare minimum to produce a single citation, which leaves zero slack — observed: an agent
 # that searches twice then burns its last step on the forced verdict reads NOTHING and cites

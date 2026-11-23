@@ -16,7 +16,7 @@ from .. import config
 from . import cache
 from .rrf import domain, normalize_url
 
-_UA = {"User-Agent": "receipts/0.1 (research verifier; +https://github.com/local/receipts)"}
+_UA = {"User-Agent": "opensearch/0.1 (research verifier)"}
 
 
 class LaneError(RuntimeError):
@@ -101,7 +101,7 @@ async def search_openalex(query: str, max_results: int = 6) -> list[dict]:
         async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as c:
             r = await c.get(
                 "https://api.openalex.org/works",
-                params={"search": query, "per-page": max_results, "mailto": "receipts@local"},
+                params={"search": query, "per-page": max_results, "mailto": "opensearch@local"},
                 headers=_UA,
             )
             if r.status_code != 200:

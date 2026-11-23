@@ -1,0 +1,18 @@
+# Core
+fastapi
+uvicorn
+httpx
+pydantic
+python-multipart
+
+# Task lane: 3D models built by the doer agent
+numpy
+trimesh
+
+# Workspaces (only needed if SUPABASE_DB_URL is set)
+asyncpg
+pgvector
+pypdf
+
+# Tests
+pytest

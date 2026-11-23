@@ -21,8 +21,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
@@ -70,15 +68,6 @@ def _key(env: str) -> str | None:
     k = os.environ.get(env)
     if k:
         return k.strip().strip('"').strip("'")
-    # Fall back to the user's other projects. NOTE: scholardesk's GROQ key is REVOKED (401);
-    # continuity's works. Order matters — verified 2026-07-16.
-    for p in ("/home/demo/projects/continuity/.env", "/home/demo/projects/scholardesk/.env.local"):
-        f = Path(p)
-        if not f.exists():
-            continue
-        m = re.search(rf'^\s*{env}\s*=\s*["\']?([^"\'\n]+)', f.read_text(), re.M)
-        if m:
-            return m.group(1).strip()
     return None
 
 

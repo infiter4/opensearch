@@ -82,7 +82,7 @@ export default function App() {
 function Wordmark() {
   return (
     <span className="flex items-baseline select-none">
-      <span className="display italic text-[23px] tracking-[-0.02em] font-[420]">receipts</span>
+      <span className="display italic text-[23px] tracking-[-0.02em] font-[420]">opensearch</span>
       <span className="ml-[3px] w-[6px] h-[6px] rounded-full bg-signal translate-y-[-1px]" />
     </span>
   );
